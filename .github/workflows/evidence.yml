@@ -32,7 +32,10 @@ jobs:
           set -e
           python -m venv .venv
           source .venv/bin/activate
-          pip install maturin scikit-learn numba
+          pip install maturin scikit-learn
+          # Numba is an optional baseline. Recent releases ship no Intel-Mac
+          # wheel; take the newest release that has one, or skip it.
+          pip install --only-binary=:all: numba || echo "No Numba wheel for this platform; skipping that baseline"
           maturin build --release --out dist
           pip install fastauc --no-index --no-deps --find-links dist
           python -c "import fastauc, platform; print('fastauc', fastauc.__version__, 'on', platform.platform())"
