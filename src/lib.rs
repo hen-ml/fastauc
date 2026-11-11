@@ -218,7 +218,7 @@ fn row_pos<'a>(row: ArrayView1<'a, u8>) -> impl Fn(usize) -> bool + 'a {
 /// (roc_auc, average_precision) for one label vector and one score vector.
 #[pyfunction]
 #[pyo3(signature = (y_true, y_score, sample_weight=None))]
-fn roc_pr_auc(
+fn roc_auc_ap(
     py: Python<'_>,
     y_true: PyReadonlyArray1<'_, u8>,
     y_score: PyReadonlyArray1<'_, f64>,
@@ -627,8 +627,13 @@ fn class_totals(yt: &[u8], w: Option<&[f64]>) -> (f64, f64) {
     (p, n)
 }
 
-/// (roc_auc, average_precision, ks, ks_threshold, f1_max, f1_threshold)
+/// (roc_auc, average_precision, ks, ks_threshold, f1_max, f1_threshold, pr_auc)
 /// from one sort. "Predict positive when score >= threshold."
+///
+/// Both PR summaries walk the same curve, one point per distinct score:
+/// average precision is the step-wise area sum(dR * P); pr_auc is the
+/// trapezoidal area sum(dR * (P + P_prev) / 2) starting from (R, P) = (0, 1),
+/// which is what `sklearn.metrics.auc(recall, precision)` computes.
 #[pyfunction]
 #[pyo3(signature = (y_true, y_score, sample_weight=None))]
 fn binary_summary(
@@ -636,7 +641,7 @@ fn binary_summary(
     y_true: PyReadonlyArray1<'_, u8>,
     y_score: PyReadonlyArray1<'_, f64>,
     sample_weight: Option<PyReadonlyArray1<'_, f64>>,
-) -> PyResult<(f64, f64, f64, f64, f64, f64)> {
+) -> PyResult<(f64, f64, f64, f64, f64, f64, f64)> {
     let yt = y_true.as_slice()?;
     let ys = y_score.as_slice()?;
     let w = weights_slice(&sample_weight)?;
@@ -647,6 +652,7 @@ fn binary_summary(
 
     Ok(detached(py, || {
         let nan = f64::NAN;
+        let (mut pr_trap, mut prev_prec) = (0.0f64, 1.0f64);
         let (p_tot, n_tot) = class_totals(yt, w);
         let s = sort_desc(ys.iter().copied());
         let (mut tp, mut fp, mut prev_tp, mut prev_fp) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
@@ -667,6 +673,11 @@ fn binary_summary(
                 roc += (fp - prev_fp) * (tp + prev_tp) * 0.5;
                 if tp > prev_tp {
                     ap += (tp - prev_tp) * (tp / (tp + fp));
+                }
+                if tp + fp > 0.0 {
+                    let prec = tp / (tp + fp);
+                    pr_trap += (tp - prev_tp) * (prec + prev_prec) * 0.5;
+                    prev_prec = prec;
                 }
                 if both {
                     let d = (tp / p_tot - fp / n_tot).abs();
@@ -693,6 +704,7 @@ fn binary_summary(
             ks_thr,
             if p_tot > 0.0 { f1 } else { nan },
             f1_thr,
+            if p_tot > 0.0 { pr_trap / p_tot } else { nan },
         )
     }))
 }
@@ -1205,7 +1217,7 @@ fn delong_components<'py>(
 
 #[pymodule(gil_used = false)]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_function(wrap_pyfunction!(roc_pr_auc, m)?)?;
+    m.add_function(wrap_pyfunction!(roc_auc_ap, m)?)?;
     m.add_function(wrap_pyfunction!(many_scores, m)?)?;
     m.add_function(wrap_pyfunction!(many_targets, m)?)?;
     m.add_function(wrap_pyfunction!(pairwise, m)?)?;

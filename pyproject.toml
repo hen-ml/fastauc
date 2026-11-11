@@ -5,14 +5,14 @@ build-backend = "maturin"
 [project]
 name = "fastauc"
 version = "0.1.0"
-description = "Fast, multithreaded classification, calibration and ranking metrics (ROC-AUC, PR-AUC, GAUC, NDCG, MRR, MAP, KS, log loss, ECE), written in Rust"
+description = "Fast, multithreaded classification, calibration and ranking metrics (ROC-AUC, average precision, PR-AUC, GAUC, NDCG, MRR, MAP, KS, log loss, ECE), written in Rust"
 readme = "README.md"
 license = "MIT"
 authors = [{ name = "Ming-Hen Tsai" }]
 license-files = ["LICENSE"]
 requires-python = ">=3.9"
 dependencies = ["numpy>=1.22"]
-keywords = ["auc", "roc-auc", "pr-auc", "gauc", "ndcg", "mrr", "map", "ranking", "calibration", "delong", "bootstrap", "metrics", "machine-learning"]
+keywords = ["auc", "roc-auc", "pr-auc", "average-precision", "gauc", "ndcg", "mrr", "map", "ranking", "calibration", "delong", "bootstrap", "metrics", "machine-learning"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",

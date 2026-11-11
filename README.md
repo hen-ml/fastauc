@@ -38,11 +38,11 @@ pip install fastauc
 
 | Function | Returns |
 |---|---|
-| `binary_metrics` | ROC-AUC, average precision, KS, max F1, log loss, normalized entropy, Brier, calibration ratio, ECE |
+| `binary_metrics` | ROC-AUC, average precision, trapezoidal PR-AUC, KS, max F1, log loss, normalized entropy, Brier, calibration ratio, ECE |
 | `ranking_metrics` | GAUC, NDCG, MRR, MAP, recall, precision, hit rate at any cutoffs, per query |
-| `roc_pr_auc_batch` | ROC-AUC and average precision for thousands of models or targets at once |
-| `roc_pr_auc_grouped` | ROC-AUC and average precision within each group |
-| `bootstrap_roc_pr_auc`, `bootstrap_ranking_metrics` | confidence intervals and paired model comparisons, by row or by group |
+| `roc_auc_ap_batch` | ROC-AUC and average precision for thousands of models or targets at once |
+| `roc_auc_ap_grouped` | ROC-AUC and average precision within each group |
+| `bootstrap_roc_auc_ap`, `bootstrap_ranking_metrics` | confidence intervals and paired model comparisons, by row or by group |
 | `delong_roc_auc` | analytic AUC confidence intervals and the DeLong test for two models, no resampling |
 | `roc_curve`, `precision_recall_curve`, `calibration_curve` | curve points for plotting, same output as scikit-learn |
 | `precision_at_recall`, `recall_at_precision`, `tpr_at_fpr`, `lift_at`, `ks_statistic`, `max_f1` | operating points with their thresholds |
@@ -59,7 +59,7 @@ pip install fastauc
 
 ```python
 fastauc.binary_metrics(y, p)
-# {'roc_auc', 'average_precision', 'ks', 'ks_threshold', 'f1_max', 'f1_threshold',
+# {'roc_auc', 'average_precision', 'pr_auc', 'ks', 'ks_threshold', 'f1_max', 'f1_threshold',
 #  'prevalence', 'log_loss', 'normalized_entropy', 'brier', 'calibration_ratio', 'ece'}
 ```
 
@@ -73,6 +73,7 @@ positive when `score >= t`".
 ```python
 fastauc.roc_auc(y, s)                   # == sklearn.metrics.roc_auc_score
 fastauc.average_precision(y, s)         # == sklearn.metrics.average_precision_score
+fastauc.pr_auc(y, s)                    # == sklearn.metrics.auc(recall, precision); see below
 fastauc.ks_statistic(y, s)              # (ks, threshold)
 fastauc.max_f1(y, s)                    # (f1, threshold)
 fastauc.precision_at_recall(y, s, 0.8)  # (precision, threshold)
@@ -86,6 +87,28 @@ fastauc.calibration_ratio(y, p)         # sum(p) / sum(y), also called COPC or E
 ```
 
 All of these accept `sample_weight` and `pos_label`.
+
+### Average precision or PR-AUC?
+
+Both summarise the same precision-recall curve, one point per distinct score,
+and they are not the same number:
+
+| | formula | scikit-learn equivalent |
+|---|---|---|
+| `average_precision` | sum of (R_k - R_{k-1}) * P_k | `average_precision_score` |
+| `pr_auc` | sum of (R_k - R_{k-1}) * (P_k + P_{k-1}) / 2, from (R, P) = (0, 1) | `auc(recall, precision)` |
+
+Average precision credits each step in recall with the precision actually
+reached there. The trapezoidal rule draws straight lines between points,
+which no classifier can achieve in precision-recall space (Davis and
+Goadrich, 2006), and it credits the starting point (0, 1) even when the
+top-scored item is a negative. With three items scored 0.9, 0.8, 0.7 and
+labels 1, 0, 1, average precision is 0.833 and PR-AUC is 0.792.
+
+Report average precision; it is what every `average_precision` field and the
+batch, grouped and bootstrap functions return. Use `pr_auc` (or the `pr_auc`
+key of `binary_metrics`) only to reproduce numbers from a pipeline that
+computes "PR-AUC" with the trapezoidal rule.
 
 ### Ranking metrics per query
 
@@ -122,12 +145,12 @@ probabilities.
 
 ```python
 S = rng.random((1000, 100_000))            # 1000 models, one row each
-roc, ap = fastauc.roc_pr_auc_batch(y, S)   # arrays of shape (1000,)
+roc, ap = fastauc.roc_auc_ap_batch(y, S)   # arrays of shape (1000,)
 
 Y = rng.integers(0, 2, (1000, 100_000))    # 1000 targets, e.g. label permutations
-roc, ap = fastauc.roc_pr_auc_batch(Y, s)   # sorts s once, then O(N) per target
+roc, ap = fastauc.roc_auc_ap_batch(Y, s)   # sorts s once, then O(N) per target
 
-roc, ap = fastauc.roc_pr_auc_batch(Y, S)   # row i against row i
+roc, ap = fastauc.roc_auc_ap_batch(Y, S)   # row i against row i
 ```
 
 2-D inputs are `(n_tasks, n_samples)` by default. For the scikit-learn layout
@@ -136,7 +159,7 @@ roc, ap = fastauc.roc_pr_auc_batch(Y, S)   # row i against row i
 ### AUC within groups
 
 ```python
-res = fastauc.roc_pr_auc_grouped(y, s, user_id)
+res = fastauc.roc_auc_ap_grouped(y, s, user_id)
 res.groups, res.roc_auc, res.average_precision, res.n_pos, res.n_neg  # aligned arrays
 res.mean("roc_auc")                      # size-weighted GAUC
 res.mean("roc_auc", weight="uniform")    # macro average over groups
@@ -145,7 +168,7 @@ res.mean("roc_auc", weight="uniform")    # macro average over groups
 ### Confidence intervals
 
 ```python
-b = fastauc.bootstrap_roc_pr_auc(y, s, n_bootstraps=2000, seed=0)
+b = fastauc.bootstrap_roc_auc_ap(y, s, n_bootstraps=2000, seed=0)
 b.roc_auc_estimate            # point estimate
 b.ci("roc_auc", level=0.95)   # (low, high) percentile interval
 b.std("average_precision")    # bootstrap standard error
@@ -159,7 +182,7 @@ same user, query or session are not independent, and a row-level bootstrap
 then reports intervals that are too narrow. Pass the ids:
 
 ```python
-b = fastauc.bootstrap_roc_pr_auc(y, s, groups=user_id, n_bootstraps=2000)
+b = fastauc.bootstrap_roc_auc_ap(y, s, groups=user_id, n_bootstraps=2000)
 ```
 
 Ranking metrics always resample whole queries:
@@ -194,7 +217,7 @@ for all models, so the comparison is paired and far more sensitive than
 comparing two separate intervals:
 
 ```python
-b = fastauc.bootstrap_roc_pr_auc(y, np.stack([scores_a, scores_b]), groups=user_id)
+b = fastauc.bootstrap_roc_auc_ap(y, np.stack([scores_a, scores_b]), groups=user_id)
 diff, (low, high), p_value = b.compare(0, 1, metric="roc_auc")
 
 r = fastauc.bootstrap_ranking_metrics(relevance, np.stack([scores_a, scores_b]), query_id)

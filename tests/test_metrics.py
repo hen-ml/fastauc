@@ -202,7 +202,7 @@ def test_calibration_edge_cases():
 def test_binary_metrics():
     y, p = make(8000, 6)
     m = fastauc.binary_metrics(y, p)
-    roc, ap = fastauc.roc_pr_auc(y, p)
+    roc, ap = fastauc.roc_auc_ap(y, p)
     assert (m["roc_auc"], m["average_precision"]) == (roc, ap)
     assert (m["ks"], m["ks_threshold"]) == fastauc.ks_statistic(y, p)
     assert (m["f1_max"], m["f1_threshold"]) == fastauc.max_f1(y, p)
@@ -304,7 +304,7 @@ def test_ranking_many_groups():
     ks = (1, 5, 10, None)
     summary, detail = fastauc.ranking_metrics(rel, s, g, ks=ks, per_group=True)
 
-    grouped = fastauc.roc_pr_auc_grouped(rel > 0, s, g)
+    grouped = fastauc.roc_auc_ap_grouped(rel > 0, s, g)
     np.testing.assert_allclose(detail["roc_auc"], grouped.roc_auc, rtol=RTOL)
     np.testing.assert_array_equal(detail["group"], grouped.groups)
     assert summary["gauc"] == pytest.approx(grouped.mean("roc_auc"))
@@ -411,7 +411,7 @@ def everything(y, p, g, w):
     out["tpr@fpr"] = fastauc.tpr_at_fpr(y, p, 0.2, sample_weight=w)[0]
     out["lift"] = fastauc.lift_at(y, p, 0.13, sample_weight=w)
     out.update(fastauc.ranking_metrics(y, p, g, ks=(1, 3, 10, None)))
-    grouped = fastauc.roc_pr_auc_grouped(y, p, g)
+    grouped = fastauc.roc_auc_ap_grouped(y, p, g)
     out["grouped_roc"] = grouped.mean("roc_auc")
     out["grouped_ap"] = grouped.mean("average_precision")
     return out

@@ -183,7 +183,7 @@ def test_delong_matches_reference(ties):
     auc, cov = delong_reference(y, S)
     np.testing.assert_allclose(r.roc_auc, auc, rtol=1e-12)
     np.testing.assert_allclose(r.covariance, cov, rtol=1e-10, atol=1e-15)
-    np.testing.assert_allclose(r.roc_auc, fastauc.roc_pr_auc_batch(y, S)[0], rtol=1e-12)
+    np.testing.assert_allclose(r.roc_auc, fastauc.roc_auc_ap_batch(y, S)[0], rtol=1e-12)
     assert (r.n_pos, r.n_neg) == (int(y.sum()), int(len(y) - y.sum()))
 
     # The paired test against its own formula.
@@ -208,7 +208,7 @@ def test_delong_matches_reference(ties):
 def test_delong_agrees_with_bootstrap():
     y, s = make(3000, 11)
     d = fastauc.delong_roc_auc(y, s)
-    b = fastauc.bootstrap_roc_pr_auc(y, s, n_bootstraps=4000, seed=0)
+    b = fastauc.bootstrap_roc_auc_ap(y, s, n_bootstraps=4000, seed=0)
     assert d.std() == pytest.approx(b.std(), rel=0.08)
 
 
@@ -247,3 +247,45 @@ def test_delong_order_invariance_and_degenerate():
         fastauc.delong_roc_auc([0, 1], [np.nan, 0.3])
     with pytest.raises(ValueError, match="mismatch"):
         fastauc.delong_roc_auc([0, 1, 1], [0.1, 0.3])
+
+
+# --------------------------------------------------------------------------
+# Average precision vs trapezoidal PR-AUC
+# --------------------------------------------------------------------------
+
+
+def test_ap_and_pr_auc_by_hand():
+    # Curve points (R, P): start (0, 1); 0.9 -> (0.5, 1); 0.8 -> (0.5, 0.5); 0.7 -> (1, 2/3).
+    y, s = np.array([1, 0, 1]), np.array([0.9, 0.8, 0.7])
+    assert fastauc.average_precision(y, s) == pytest.approx(0.5 * 1 + 0.5 * 2 / 3)
+    assert fastauc.pr_auc(y, s) == pytest.approx(0.5 * (1 + 1) / 2 + 0.5 * (0.5 + 2 / 3) / 2)
+
+
+@pytest.mark.parametrize("ties", [False, True])
+@pytest.mark.parametrize("weighted", [False, True])
+def test_pr_auc_matches_sklearn_trapezoid(ties, weighted):
+    y, s = make(4000, 14, ties)
+    w = weights(len(y), 15) if weighted else None  # includes zero weights
+    p, r, _ = skm.precision_recall_curve(y, s, sample_weight=w)
+    assert fastauc.pr_auc(y, s, sample_weight=w) == pytest.approx(skm.auc(r, p), rel=1e-12)
+    # Same curve as precision_recall_curve: trapezoid of its points.
+    fp, fr, _ = fastauc.precision_recall_curve(y, s, sample_weight=w)
+    trap = float(np.sum(-np.diff(fr) * (fp[1:] + fp[:-1]) / 2))
+    assert fastauc.pr_auc(y, s, sample_weight=w) == pytest.approx(trap, rel=1e-12)
+    # ...and step-wise area of the same points is average precision.
+    assert fastauc.average_precision(y, s, sample_weight=w) == pytest.approx(
+        float(np.sum(-np.diff(fr) * fp[:-1])), rel=1e-12
+    )
+
+
+def test_pr_auc_in_binary_metrics_and_degenerate_cases():
+    y, s = make(1000, 16, ties=True)
+    m = fastauc.binary_metrics(y, s)
+    assert m["pr_auc"] == fastauc.pr_auc(y, s)
+    assert m["average_precision"] == fastauc.average_precision(y, s)
+    assert m["pr_auc"] != m["average_precision"]
+    assert math.isnan(fastauc.pr_auc(np.zeros(4), np.arange(4.0)))
+    assert fastauc.pr_auc(np.ones(4), np.arange(4.0)) == 1.0
+    assert fastauc.pr_auc([1, 0], [0.5, 0.5]) == pytest.approx(0.75)  # (0,1) -> (1, 0.5)
+    perm = np.random.default_rng(0).permutation(len(y))
+    assert fastauc.pr_auc(y[perm], s[perm]) == pytest.approx(m["pr_auc"], rel=1e-12)
