@@ -365,6 +365,19 @@ versus 0.18 s.
 The script also times torchmetrics when it is installed; that comparison has
 not been run for this table.
 
+### End-to-end evidence on synthetic data
+
+`python benchmarks/evidence.py` builds two synthetic ranking workloads with
+bfloat16-tied scores (short lists of 10, and ragged pools of 8 to 95
+documents) and reports, in one file: nDCG@10 against a step-by-step reference
+and scikit-learn, ROC-AUC and average precision against scikit-learn, how far
+position-based tie-breaking moves the result, a paired query-level bootstrap
+comparison of two models, and timings against scikit-learn, a Python loop and
+(if installed) a Numba kernel. It exits with an error if any accuracy check
+fails. The [Evidence (macOS)](https://github.com/hen-ml/fastauc/actions/workflows/evidence.yml)
+workflow runs it on Apple silicon and Intel Macs and shows the report in each
+run's summary.
+
 ## Development
 
 ```
