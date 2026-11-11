@@ -1,0 +1,27 @@
+[package]
+name = "fastauc"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Fast, multithreaded ROC-AUC and PR-AUC (average precision) for Python"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/hen-ml/fastauc"
+authors = ["Ming-Hen Tsai"]
+publish = false
+
+[lib]
+name = "_core"
+crate-type = ["cdylib"]
+
+[dependencies]
+# abi3-py39: one wheel per platform covers every CPython >= 3.9.
+pyo3 = { version = "0.30", features = ["abi3-py39"] }
+numpy = "0.30"
+rayon = "1.10"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = "symbols"

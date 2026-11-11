@@ -1,0 +1,43 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "fastauc"
+version = "0.1.0"
+description = "Fast, multithreaded classification, calibration and ranking metrics (ROC-AUC, PR-AUC, GAUC, NDCG, MRR, MAP, KS, log loss, ECE), written in Rust"
+readme = "README.md"
+license = "MIT"
+authors = [{ name = "Ming-Hen Tsai" }]
+license-files = ["LICENSE"]
+requires-python = ">=3.9"
+dependencies = ["numpy>=1.22"]
+keywords = ["auc", "roc-auc", "pr-auc", "gauc", "ndcg", "mrr", "map", "ranking", "calibration", "delong", "bootstrap", "metrics", "machine-learning"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Rust",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7", "scikit-learn>=1.1", "scipy"]
+
+[project.urls]
+Homepage = "https://github.com/hen-ml/fastauc"
+Repository = "https://github.com/hen-ml/fastauc"
+Issues = "https://github.com/hen-ml/fastauc/issues"
+Changelog = "https://github.com/hen-ml/fastauc/blob/main/CHANGELOG.md"
+
+[tool.maturin]
+python-source = "python"
+module-name = "fastauc._core"
+features = ["pyo3/extension-module"]
+exclude = ["dist/**", "target/**", ".github/**"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
