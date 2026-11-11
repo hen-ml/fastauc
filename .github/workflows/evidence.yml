@@ -1,0 +1,49 @@
+# Builds fastauc from source on macOS (Apple silicon and Intel) and runs the
+# synthetic evidence report: accuracy against a reference implementation and
+# scikit-learn, tie handling, a paired bootstrap comparison, and speed against
+# scikit-learn, a Python loop and a Numba kernel. The report appears in each
+# job's summary and as a downloadable artifact.
+name: Evidence (macOS)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  evidence:
+    name: evidence (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-latest, macos-15-intel]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Build and install fastauc from source
+        run: |
+          set -e
+          python -m venv .venv
+          source .venv/bin/activate
+          pip install maturin scikit-learn numba
+          maturin build --release --out dist
+          pip install fastauc --no-index --no-deps --find-links dist
+          python -c "import fastauc, platform; print('fastauc', fastauc.__version__, 'on', platform.platform())"
+      - name: Run evidence report
+        run: |
+          set -e
+          source .venv/bin/activate
+          python benchmarks/evidence.py --out evidence-out
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: evidence-${{ matrix.runner }}
+          path: evidence-out
