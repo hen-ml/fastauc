@@ -8,7 +8,7 @@ authors:
 repository-code: "https://github.com/hen-ml/fastauc"
 url: "https://hen-ml.github.io/fastauc/"
 license: MIT
-version: "0.2.0"
+version: "0.3.0"
 date-released: "2026-11-12"
 keywords:
   - evaluation metrics

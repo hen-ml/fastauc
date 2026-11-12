@@ -1,10 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.3.0
 
-- `fastauc.lightgbm` and `fastauc.xgboost`: one-line evaluation metrics, e.g. `feval=fastauc.lightgbm.ranking("ndcg@10", "mrr@10", "gauc")` or `custom_metric=fastauc.xgboost.binary("roc_auc", "log_loss")`, with exact ties and early-stopping directions.
+- `fastauc.lightgbm` and `fastauc.xgboost`: one-line evaluation metrics, e.g. `feval=fastauc.lightgbm.ranking("ndcg@10", "mrr@10", "gauc")` or `custom_metric=fastauc.xgboost.binary("roc_auc", "log_loss")`, with exact ties and early-stopping directions; XGBoost's per-query weights are honoured.
 - `BinaryAccumulator.all_gather()`: exact merge across `torch.distributed` ranks (DDP, PyTorch Lightning); a copy outside a process group.
-- Torch tensors are accepted by every core function, on any device and with or without grad. Polars and PyArrow columns (including string query ids) are tested inputs.
+- Torch tensors are accepted by every core function, on any device, with or without grad, bfloat16 included (widened exactly to float32). Polars and PyArrow columns (including string query ids) are tested inputs.
 - `CITATION.cff`.
 
 ## 0.2.0
