@@ -1,34 +1,11 @@
-"""fastauc as a LightGBM evaluation metric.
+"""fastauc as LightGBM evaluation metrics.
 
     python examples/lightgbm_eval.py
 """
 import lightgbm as lgb
 import numpy as np
 
-import fastauc
-
-
-def ranking_feval(preds, data):
-    """NDCG / MRR / GAUC for a lambdarank model. Ties are handled exactly."""
-    m = fastauc.ranking_metrics(
-        data.get_label(), preds, group_sizes=data.get_group(), ks=(10,)
-    )
-    return [
-        ("ndcg@10", m["ndcg@10"], True),
-        ("mrr@10", m["mrr@10"], True),
-        ("gauc", m["gauc"], True),
-    ]
-
-
-def binary_feval(preds, data):
-    """Discrimination and calibration for a binary (CTR / CVR) model."""
-    m = fastauc.binary_metrics(data.get_label(), preds, sample_weight=data.get_weight())
-    return [
-        ("roc_auc", m["roc_auc"], True),
-        ("ks", m["ks"], True),
-        ("normalized_entropy", m["normalized_entropy"], False),
-        ("calibration_ratio", m["calibration_ratio"], True),
-    ]
+from fastauc import lightgbm as fa_lgb
 
 
 def main():
@@ -45,12 +22,13 @@ def main():
     lgb.train(
         {"objective": "lambdarank", "metric": "None", "verbose": -1},
         train, num_boost_round=20, valid_sets=[valid], valid_names=["valid"],
-        feval=ranking_feval, callbacks=[lgb.record_evaluation(history)],
+        feval=fa_lgb.ranking("ndcg@10", "mrr@10", "gauc"),  # ties handled exactly
+        callbacks=[lgb.record_evaluation(history)],
     )
-    print("lambdarank ndcg@10:", round(history["valid"]["ndcg@10"][-1], 4))
+    print("lambdarank:", {k: round(v[-1], 4) for k, v in history["valid"].items()})
     assert history["valid"]["ndcg@10"][-1] > history["valid"]["ndcg@10"][0] - 1e-9
 
-    # Binary.
+    # Binary (CTR / CVR): discrimination and calibration.
     y = (rng.random(len(x)) < 1 / (1 + np.exp(-x[:, 0]))).astype(int)
     train = lgb.Dataset(x[:half], y[:half])
     valid = lgb.Dataset(x[half:], y[half:], reference=train)
@@ -58,7 +36,8 @@ def main():
     lgb.train(
         {"objective": "binary", "metric": "None", "verbose": -1},
         train, num_boost_round=20, valid_sets=[valid], valid_names=["valid"],
-        feval=binary_feval, callbacks=[lgb.record_evaluation(history)],
+        feval=fa_lgb.binary("roc_auc", "ks", "normalized_entropy"),
+        callbacks=[lgb.record_evaluation(history)],
     )
     print("binary:", {k: round(v[-1], 4) for k, v in history["valid"].items()})
     assert history["valid"]["roc_auc"][-1] > 0.7

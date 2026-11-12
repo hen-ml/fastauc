@@ -40,8 +40,11 @@ total = acc_worker_0 + acc_worker_1 + acc_worker_2
 acc_worker_0.merge(acc_worker_1, acc_worker_2)   # in place
 ```
 
-They pickle, and `state()` / `BinaryAccumulator.from_state()` expose plain
-arrays for `torch.distributed.all_gather_object`, MPI or Spark:
+Under `torch.distributed` (DDP, PyTorch Lightning), `acc.all_gather()`
+merges every rank's accumulator and returns the total on each rank (see
+[Integrations](integrations.md#pytorch-and-pytorch-lightning)). For other
+systems, accumulators pickle, and `state()` /
+`BinaryAccumulator.from_state()` expose plain arrays for MPI or Spark:
 
 ```python
 state = acc.state()      # {'score', 'pos', 'neg', 'n_samples'}

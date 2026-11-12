@@ -61,33 +61,5 @@ where $R$ is the number of relevant items for the query.
 
 ## Inside training loops
 
-**LightGBM**
-
-```python
-def ranking_feval(preds, data):
-    m = fastauc.ranking_metrics(data.get_label(), preds, group_sizes=data.get_group(), ks=(10,))
-    return [("ndcg@10", m["ndcg@10"], True), ("mrr@10", m["mrr@10"], True)]
-
-lgb.train(params, train, valid_sets=[valid], feval=ranking_feval)
-```
-
-**XGBoost**
-
-```python
-def ndcg_at_10(preds, dmatrix):
-    m = fastauc.ranking_metrics(dmatrix.get_label(), preds,
-                                group_sizes=dmatrix.get_group().astype(np.int64), ks=(10,))
-    return "fastauc-ndcg@10", m["ndcg@10"]
-
-xgb.train(params, dtrain, evals=[(dvalid, "valid")], custom_metric=ndcg_at_10)
-```
-
-**PyTorch**, or anything that can hand over a NumPy array:
-
-```python
-p = torch.sigmoid(logits).cpu().numpy()
-metrics = fastauc.binary_metrics(labels.cpu().numpy(), p)
-metrics.update(fastauc.ranking_metrics(labels.cpu().numpy(), p, query_ids.cpu().numpy()))
-```
-
-Runnable scripts are in the repository's `examples/` folder.
+See [Integrations](integrations.md) for one-line LightGBM and XGBoost
+metrics, PyTorch Lightning, and dataframe inputs.

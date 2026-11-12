@@ -298,34 +298,39 @@ The randomization test enumerates every sign pattern when that is feasible
 
 Runnable scripts are in [`examples/`](examples).
 
-**LightGBM**
+**LightGBM and XGBoost**: one line, any mix of metrics, early stopping included.
 
 ```python
-def ranking_feval(preds, data):
-    m = fastauc.ranking_metrics(data.get_label(), preds, group_sizes=data.get_group(), ks=(10,))
-    return [("ndcg@10", m["ndcg@10"], True), ("mrr@10", m["mrr@10"], True)]
+from fastauc import lightgbm as fa_lgb, xgboost as fa_xgb
 
-lgb.train(params, train, valid_sets=[valid], feval=ranking_feval)
+lgb.train(params, train, valid_sets=[valid], feval=fa_lgb.ranking("ndcg@10", "mrr@10", "gauc"))
+lgb.train(params, train, valid_sets=[valid], feval=fa_lgb.binary("roc_auc", "log_loss"))
+
+xgb.train(params, dtrain, evals=[(dvalid, "valid")], custom_metric=fa_xgb.ranking("ndcg@10"))
 ```
 
-**XGBoost**
+Unlike the built-in NDCG and MAP of both libraries, these do not change when
+tied predictions are reordered (early in training, many predictions tie).
+
+**PyTorch and PyTorch Lightning.** Tensors go in directly (on any device,
+with or without grad), and `BinaryAccumulator.all_gather()` merges the
+per-rank accumulators exactly under DDP:
 
 ```python
-def ndcg_at_10(preds, dmatrix):
-    m = fastauc.ranking_metrics(dmatrix.get_label(), preds,
-                                group_sizes=dmatrix.get_group().astype(np.int64), ks=(10,))
-    return "fastauc-ndcg@10", m["ndcg@10"]
+def on_validation_epoch_start(self):
+    self.acc = fastauc.BinaryAccumulator()
 
-xgb.train(params, dtrain, evals=[(dvalid, "valid")], custom_metric=ndcg_at_10)
+def validation_step(self, batch, batch_idx):
+    x, y = batch
+    self.acc.update(y, torch.sigmoid(self(x)))
+
+def on_validation_epoch_end(self):
+    m = self.acc.all_gather().compute()          # same numbers on every rank
+    self.log_dict({"val_auc": m["roc_auc"], "val_ne": m["normalized_entropy"]})
 ```
 
-**PyTorch** (or anything that can hand over a NumPy array)
-
-```python
-p = torch.sigmoid(logits).cpu().numpy()
-metrics = fastauc.binary_metrics(labels.cpu().numpy(), p)
-metrics.update(fastauc.ranking_metrics(labels.cpu().numpy(), p, query_ids.cpu().numpy()))
-```
+**Polars, PyArrow, pandas.** Columns go in as they are, string query ids
+included: `fastauc.ranking_metrics(df["clicked"], df["score"], df["query_id"])`.
 
 **Threads.** fastauc uses all cores by default. Inside data-loader workers,
 joblib jobs or any code that is already parallel, call
