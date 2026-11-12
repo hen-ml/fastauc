@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "pyfastauc"
-version = "0.2.0"
+version = "0.3.0"
 description = "Fast, multithreaded classification, calibration and ranking metrics (ROC-AUC, average precision, PR-AUC, GAUC, NDCG, MRR, MAP, KS, log loss, ECE), written in Rust"
 readme = "README.md"
 license = "MIT"
