@@ -1591,6 +1591,15 @@ def delong_roc_auc(
 # ---------------------------------------------------------------------------
 
 
+def _same_label(a: Any, b: Any) -> bool:
+    if a is None or b is None:
+        return a is b
+    try:
+        return bool(a == b)
+    except (TypeError, ValueError):
+        return False
+
+
 class BinaryAccumulator:
     """Exact binary metrics over data that arrives in batches.
 
@@ -1645,6 +1654,12 @@ class BinaryAccumulator:
         for o in others:
             if not isinstance(o, BinaryAccumulator):
                 raise TypeError(f"cannot merge {type(o).__name__} into BinaryAccumulator")
+            if not _same_label(o.pos_label, self.pos_label):
+                raise ValueError(
+                    f"cannot merge accumulators with different pos_label "
+                    f"({self.pos_label!r} vs {o.pos_label!r}): their positive classes differ"
+                )
+        for o in others:
             self._merge_table(o._score, o._pos, o._neg)
             self.n_samples += o.n_samples
         return self

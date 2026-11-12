@@ -22,7 +22,7 @@ scikit-learn 1.9) and returns the same value:
 | `roc_curve`, `precision_recall_curve` | `pos_label`, `sample_weight`, `drop_intermediate` |
 | `ndcg_score`, `dcg_score` | `k`, `log_base`, `sample_weight`, rows with no relevant item |
 | `auc` | increasing or decreasing `x` |
-| `log_loss` | binary and multiclass, `labels`, `normalize`, renormalisation warning |
+| `log_loss` | binary and multiclass, `labels`, `normalize`, the warning for rows that do not sum to one (no renormalisation, as in scikit-learn 1.5+) |
 | `brier_score_loss` | `pos_label`, 2-D probabilities, `scale_by_half` |
 
 The test suite compares every function with scikit-learn on tied scores,

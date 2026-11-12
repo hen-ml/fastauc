@@ -154,7 +154,9 @@ def test_losses(data):
     check("log_loss", y, p, sample_weight=w, normalize=False)
     check("log_loss", data["yc"], data["P"])
     check("log_loss", [0, 1, 1], [0, 1, 0])  # hard 0/1 predictions are clipped
-    check("log_loss", [0, 1, 1], [[0.2, 0.3], [0.1, 0.1], [0.5, 0.5]])  # renormalised, warns
+    # Rows that do not sum to one: scikit-learn >= 1.5 warns and does NOT
+    # renormalise (older versions did), and neither do we.
+    check("log_loss", [0, 1, 1], [[0.2, 0.3], [0.1, 0.1], [0.5, 0.5]])
     check("log_loss", [1, 1], [0.9, 0.8], labels=[0, 1])
     check("brier_score_loss", y, p, sample_weight=w)
     check("brier_score_loss", data["yc"], data["P"])

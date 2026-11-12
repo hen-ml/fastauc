@@ -125,6 +125,21 @@ def test_accumulator_rejects_other_types():
         fa.BinaryAccumulator().merge(object())
 
 
+def test_accumulator_rejects_different_pos_label():
+    a = fa.BinaryAccumulator(pos_label=1).update([0, 1, 1], [0.1, 0.2, 0.3])
+    b = fa.BinaryAccumulator(pos_label=0).update([0, 1, 1], [0.1, 0.2, 0.3])
+    before = a.state()
+    with pytest.raises(ValueError, match="pos_label"):
+        a.merge(b)
+    with pytest.raises(ValueError, match="pos_label"):
+        a + fa.BinaryAccumulator()  # default None differs from 1
+    after = a.state()  # a failed merge leaves the accumulator untouched
+    assert after["n_samples"] == before["n_samples"]
+    np.testing.assert_array_equal(after["pos"], before["pos"])
+    c = fa.BinaryAccumulator(pos_label=np.int64(1)).update([1, 0], [0.5, 0.4])
+    assert a.copy().merge(c).n_samples == 5  # equal labels of different types merge
+
+
 # ------------------------------------------------------------ paired tests
 
 
