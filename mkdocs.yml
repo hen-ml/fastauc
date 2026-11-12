@@ -13,6 +13,7 @@ nav:
   - Ranking metrics: ranking.md
   - scikit-learn drop-in: sklearn.md
   - Streaming and distributed: streaming.md
+  - Integrations: integrations.md
   - Confidence intervals and tests: significance.md
   - Performance: performance.md
   - API reference: api.md

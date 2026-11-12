@@ -55,6 +55,10 @@ jobs:
           source .venv/bin/activate
           pip install pyfastauc --no-index --no-deps --find-links dist
           pip install numpy scikit-learn scipy pytest
+          if [ "${{ matrix.target }}" = x86_64 ] && [ "${{ matrix.manylinux }}" = auto ]; then
+            # Optional integrations, exercised once.
+            pip install lightgbm xgboost polars pyarrow
+          fi
           pytest
       - uses: actions/setup-python@v6
         if: ${{ matrix.target == 'x86_64' && matrix.manylinux == 'auto' }}

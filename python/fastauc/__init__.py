@@ -35,7 +35,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from statistics import NormalDist
-from typing import Any, Dict, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
@@ -93,8 +93,22 @@ ArrayLike = Any
 # ---------------------------------------------------------------------------
 
 
+def _np(x: Any, dtype: Any = None) -> np.ndarray:
+    """NumPy array from any array-like. Torch tensors (on any device, with or
+    without grad) are detached and copied to host memory; Polars, PyArrow,
+    pandas, JAX and NumPy inputs go through ``np.asarray``."""
+    if hasattr(x, "detach") and hasattr(x, "cpu") and hasattr(x, "numpy"):
+        x = x.detach().cpu()
+        try:
+            x = x.numpy()
+        except TypeError:
+            # NumPy has no bfloat16: widen to float32, which represents it exactly.
+            x = x.float().numpy()
+    return np.asarray(x, dtype=dtype)
+
+
 def _labels(y_true: ArrayLike, pos_label: Any = None) -> np.ndarray:
-    a = np.asarray(y_true)
+    a = _np(y_true)
     if pos_label is not None:
         return np.ascontiguousarray(a == pos_label, dtype=np.uint8)
     if a.dtype == np.bool_:
@@ -112,7 +126,7 @@ def _labels(y_true: ArrayLike, pos_label: Any = None) -> np.ndarray:
 
 
 def _scores(y_score: ArrayLike) -> np.ndarray:
-    a = np.asarray(y_score)
+    a = _np(y_score)
     if a.dtype.kind not in "iufb":
         raise TypeError(f"y_score has non-numeric dtype {a.dtype}")
     return np.ascontiguousarray(a, dtype=np.float64)
@@ -121,7 +135,7 @@ def _scores(y_score: ArrayLike) -> np.ndarray:
 def _weights(sample_weight: Optional[ArrayLike]) -> Optional[np.ndarray]:
     if sample_weight is None:
         return None
-    w = np.ascontiguousarray(sample_weight, dtype=np.float64)
+    w = np.ascontiguousarray(_np(sample_weight), dtype=np.float64)
     if w.ndim != 1:
         raise ValueError("sample_weight must be 1-D")
     return w
@@ -146,7 +160,7 @@ def _samples_last(a: np.ndarray, axis: int) -> np.ndarray:
 
 def _group_codes(groups: ArrayLike, n: int) -> Tuple[np.ndarray, np.ndarray]:
     """Map group ids to dense codes. Returns (sorted unique ids, int64 codes)."""
-    g = np.asarray(groups)
+    g = _np(groups)
     _require_1d("groups", g)
     if len(g) != n:
         raise ValueError(f"groups has length {len(g)}, expected {n}")
@@ -356,7 +370,7 @@ def roc_auc_multiclass(
     labels : the classes, in the order of the columns of ``y_score``.
     sample_weight : (n_samples,), ``"ovr"`` only.
     """
-    yt = np.asarray(y_true)
+    yt = _np(y_true)
     _require_1d("y_true", yt)
     S = _scores(y_score)
     if S.ndim != 2 or S.shape[0] != len(yt):
@@ -1127,7 +1141,7 @@ def _ranking_setup(y_true, n, groups, group_sizes, ks, gain, no_relevant, sample
 
     Returns (yt, gains, ids, codes, size, core_ks, names, group_weight, core_kw).
     """
-    rel = np.asarray(y_true)
+    rel = _np(y_true)
     _require_1d("y_true", rel)
     if len(rel) != n:
         raise ValueError(f"y_true has length {len(rel)}, y_score has {n} samples")
@@ -1150,7 +1164,7 @@ def _ranking_setup(y_true, n, groups, group_sizes, ks, gain, no_relevant, sample
     if groups is not None:
         ids, codes = _group_codes(groups, n)
     else:
-        sizes = np.asarray(group_sizes)
+        sizes = _np(group_sizes)
         _require_1d("group_sizes", sizes)
         if sizes.dtype.kind not in "iu" or (sizes.size and sizes.min() < 0):
             raise ValueError("group_sizes must be non-negative integers")
@@ -1211,8 +1225,8 @@ def _judged_ideal(judgments, ids, by_position: bool, core_ks, gain):
         jg, jrel = judgments
     except (TypeError, ValueError):
         raise ValueError("judgments must be a pair (group ids, relevance)") from None
-    jg = np.asarray(jg)
-    jrel = np.asarray(jrel, dtype=np.float64)
+    jg = _np(jg)
+    jrel = _np(jrel, dtype=np.float64)
     _require_1d("judgments group ids", jg)
     _require_1d("judgments relevance", jrel)
     if len(jg) != len(jrel):
@@ -1664,6 +1678,28 @@ class BinaryAccumulator:
             self.n_samples += o.n_samples
         return self
 
+    def all_gather(self, group: Any = None) -> "BinaryAccumulator":
+        """The total over all ``torch.distributed`` ranks, on every rank.
+
+        Use it at the end of an epoch under DDP or PyTorch Lightning: each rank
+        updates its own accumulator, then ``acc.all_gather().compute()`` gives
+        every rank the exact metrics of the full evaluation set. Ranks merge in
+        rank order. Outside an initialised process group (or without torch)
+        this returns a copy, so the same code runs on one device.
+        """
+        try:
+            import torch.distributed as dist
+        except ImportError:
+            return self.copy()
+        if not (dist.is_available() and dist.is_initialized()):
+            return self.copy()
+        states: List[Any] = [None] * dist.get_world_size(group)
+        dist.all_gather_object(states, self.state(), group=group)
+        total = BinaryAccumulator(pos_label=self.pos_label)
+        for st in states:
+            total.merge(BinaryAccumulator.from_state(st, pos_label=self.pos_label))
+        return total
+
     def __add__(self, other: "BinaryAccumulator") -> "BinaryAccumulator":
         return self.copy().merge(other)
 
@@ -1838,8 +1874,8 @@ def paired_test(
     ``alternative`` is ``"two-sided"``, ``"greater"`` (A > B) or ``"less"``.
     Correct for multiple comparisons with :func:`holm`.
     """
-    x = np.asarray(a, dtype=np.float64).ravel()
-    y = np.asarray(b, dtype=np.float64).ravel()
+    x = _np(a, dtype=np.float64).ravel()
+    y = _np(b, dtype=np.float64).ravel()
     if x.shape != y.shape:
         raise ValueError(f"a and b must have the same length ({len(x)} vs {len(y)})")
     if alternative not in ("two-sided", "greater", "less"):

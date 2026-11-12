@@ -1,0 +1,21 @@
+cff-version: 1.2.0
+message: "If you use fastauc in your research, please cite it as below."
+title: "fastauc: exact, fast classification, calibration and ranking metrics"
+type: software
+authors:
+  - family-names: Tsai
+    given-names: Ming-Hen
+repository-code: "https://github.com/hen-ml/fastauc"
+url: "https://hen-ml.github.io/fastauc/"
+license: MIT
+version: "0.2.0"
+date-released: "2026-11-12"
+keywords:
+  - evaluation metrics
+  - ROC-AUC
+  - average precision
+  - NDCG
+  - learning to rank
+  - tied scores
+  - calibration
+  - Rust

@@ -60,3 +60,21 @@
         - dcg_score
         - log_loss
         - brier_score_loss
+
+## fastauc.lightgbm
+
+::: fastauc.lightgbm
+    options:
+      show_root_heading: false
+      members:
+        - ranking
+        - binary
+
+## fastauc.xgboost
+
+::: fastauc.xgboost
+    options:
+      show_root_heading: false
+      members:
+        - ranking
+        - binary
