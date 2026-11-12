@@ -41,12 +41,14 @@ import numpy as np
 
 from . import _core
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "roc_auc",
     "average_precision",
     "pr_auc",
+    "partial_roc_auc",
+    "roc_auc_multiclass",
     "roc_auc_ap",
     "roc_auc_ap_batch",
     "roc_auc_ap_grouped",
@@ -63,6 +65,10 @@ __all__ = [
     "calibration_curve",
     "delong_roc_auc",
     "DeLongResult",
+    "BinaryAccumulator",
+    "paired_test",
+    "PairedTestResult",
+    "holm",
     "calibration_metrics",
     "log_loss",
     "brier_score",
@@ -156,6 +162,24 @@ def _group_codes(groups: ArrayLike, n: int) -> Tuple[np.ndarray, np.ndarray]:
             remap = np.cumsum(present) - 1
             ids = (np.flatnonzero(present) + lo).astype(g.dtype)
             return ids, np.ascontiguousarray(remap[raw], dtype=np.int64)
+    if g.dtype.kind == "O" and g.size:
+        # Python strings (e.g. from pandas): convert to fixed-width text in C.
+        try:
+            as_text = g.astype(str)
+        except (TypeError, ValueError):
+            as_text = None
+        if as_text is not None and all(isinstance(v, str) for v in (g[0], g[-1])) \
+                and bool(np.all(as_text == g)):
+            g = as_text
+    if g.dtype.kind in "US" and g.size and g.dtype.itemsize > 0:
+        # Exact hashing: O(N), ids compared byte for byte on collision.
+        raw = np.ascontiguousarray(g).view(np.uint8).reshape(len(g), g.dtype.itemsize)
+        codes, first = _core.hash_codes(raw)
+        uniq = g[first]
+        order = np.argsort(uniq, kind="stable")  # sort only the distinct ids
+        rank = np.empty(len(order), dtype=np.int64)
+        rank[order] = np.arange(len(order))
+        return uniq[order], np.ascontiguousarray(rank[codes])
     ids, codes = np.unique(g, return_inverse=True)
     return ids, np.ascontiguousarray(codes.reshape(-1), dtype=np.int64)
 
@@ -263,6 +287,126 @@ def pr_auc(
     :func:`average_precision` otherwise. ``NaN`` without positives.
     """
     return _core.binary_summary(*_pair(y_true, y_score, sample_weight, pos_label))[6]
+
+
+def partial_roc_auc(
+    y_true: ArrayLike,
+    y_score: ArrayLike,
+    max_fpr: float,
+    *,
+    standardized: bool = True,
+    sample_weight: Optional[ArrayLike] = None,
+    pos_label: Any = None,
+) -> float:
+    """ROC-AUC restricted to false positive rates up to ``max_fpr``.
+
+    With ``standardized=True`` (default) the area is rescaled with the McClish
+    correction, so 0.5 is chance and 1.0 is perfect, exactly as
+    ``sklearn.metrics.roc_auc_score(..., max_fpr=max_fpr)``. With
+    ``standardized=False`` it is the raw area, between 0 and ``max_fpr``.
+    The curve is interpolated linearly at ``max_fpr``. ``NaN`` unless both
+    classes are present.
+    """
+    max_fpr = float(max_fpr)
+    if not 0.0 < max_fpr <= 1.0:
+        raise ValueError("max_fpr must be in (0, 1]")
+    fpr, tpr, _ = roc_curve(y_true, y_score, sample_weight=sample_weight, pos_label=pos_label)
+    if np.isnan(fpr).any() or np.isnan(tpr).any():
+        return _NAN
+    stop = int(np.searchsorted(fpr, max_fpr, side="right"))
+    if stop < len(fpr):
+        x = np.append(fpr[:stop], max_fpr)
+        y = np.append(tpr[:stop], np.interp(max_fpr, fpr[stop - 1: stop + 1], tpr[stop - 1: stop + 1]))
+    else:
+        x, y = fpr, tpr
+    area = float(np.sum(np.diff(x) * (y[1:] + y[:-1]) / 2.0))
+    if not standardized:
+        return area
+    lo, hi = 0.5 * max_fpr ** 2, max_fpr
+    return 0.5 * (1.0 + (area - lo) / (hi - lo))
+
+
+def roc_auc_multiclass(
+    y_true: ArrayLike,
+    y_score: ArrayLike,
+    *,
+    multi_class: str = "ovr",
+    average: Optional[str] = "macro",
+    labels: Optional[ArrayLike] = None,
+    sample_weight: Optional[ArrayLike] = None,
+) -> Any:
+    """ROC-AUC for more than two classes.
+
+    Same values as ``sklearn.metrics.roc_auc_score`` with the matching
+    ``multi_class`` and ``average``. A class absent from ``y_true`` has an
+    undefined one-vs-rest AUC (``NaN``), which makes its average ``NaN``.
+
+    Parameters
+    ----------
+    y_true : (n_samples,) class labels
+    y_score : (n_samples, n_classes)
+        One column per class, in the order of ``labels`` (default: the sorted
+        distinct values of ``y_true``), as returned by ``predict_proba``.
+        Unlike scikit-learn, scores need not be probabilities.
+    multi_class : ``"ovr"`` (each class against the rest) or ``"ovo"`` (each
+        pair of classes, averaged as in Hand and Till, 2001).
+    average : ``"macro"``, ``"weighted"`` (by class prevalence, or pair
+        prevalence for ``"ovo"``), ``"micro"`` (``"ovr"`` only: one AUC over
+        all class-sample pairs) or ``None`` (``"ovr"`` only: per-class array).
+    labels : the classes, in the order of the columns of ``y_score``.
+    sample_weight : (n_samples,), ``"ovr"`` only.
+    """
+    yt = np.asarray(y_true)
+    _require_1d("y_true", yt)
+    S = _scores(y_score)
+    if S.ndim != 2 or S.shape[0] != len(yt):
+        raise ValueError(f"y_score must have shape (n_samples, n_classes); got {S.shape}")
+    if labels is None:
+        classes = np.unique(yt)
+    else:
+        classes = np.asarray(labels)
+        if len(np.unique(classes)) != len(classes):
+            raise ValueError("labels must be unique")
+        if np.setdiff1d(yt, classes).size:
+            raise ValueError("y_true contains labels not in labels")
+    if len(classes) != S.shape[1]:
+        raise ValueError(f"{len(classes)} classes but y_score has {S.shape[1]} columns")
+    w = _weights(sample_weight)
+    Y = (yt[None, :] == classes[:, None]).astype(np.uint8)  # (n_classes, n_samples)
+
+    if multi_class == "ovr":
+        if average not in ("macro", "weighted", "micro", None):
+            raise ValueError("average must be 'macro', 'weighted', 'micro' or None")
+        if average == "micro":
+            ww = None if w is None else np.repeat(w, len(classes))
+            return roc_auc(Y.T.ravel(), S.ravel(), sample_weight=ww)
+        auc_per_class, _ = _core.pairwise(Y, np.ascontiguousarray(S.T), w)
+        if average is None:
+            return auc_per_class
+        if average == "macro":
+            return float(np.mean(auc_per_class))
+        prevalence = Y.sum(axis=1).astype(np.float64) if w is None else Y @ w
+        return float(np.average(auc_per_class, weights=prevalence))
+
+    if multi_class != "ovo":
+        raise ValueError("multi_class must be 'ovr' or 'ovo'")
+    if w is not None:
+        raise ValueError("sample_weight is not supported for multi_class='ovo'")
+    if average not in ("macro", "weighted"):
+        raise ValueError("average must be 'macro' or 'weighted' for multi_class='ovo'")
+    present = [i for i in range(len(classes)) if Y[i].any()]
+    scores, prevalence = [], []
+    for ia in range(len(present)):
+        for ib in range(ia + 1, len(present)):
+            a, b = present[ia], present[ib]
+            mask = (Y[a] | Y[b]).astype(bool)
+            auc_a = roc_auc(Y[a][mask], S[mask, a])
+            auc_b = roc_auc(Y[b][mask], S[mask, b])
+            scores.append((auc_a + auc_b) / 2.0)
+            prevalence.append(mask.mean())
+    if not scores:
+        return _NAN
+    return float(np.average(scores, weights=prevalence if average == "weighted" else None))
 
 
 # ---------------------------------------------------------------------------
@@ -977,8 +1121,12 @@ def binary_metrics(
 _RANK_NAMES = ("ndcg", "mrr", "map", "recall", "precision", "hit_rate")
 
 
-def _ranking_setup(y_true, n, groups, group_sizes, ks, gain, no_relevant, sample_weight):
-    """Shared input handling for ranking_metrics and its bootstrap."""
+def _ranking_setup(y_true, n, groups, group_sizes, ks, gain, no_relevant, sample_weight,
+                   judgments=None, map_denominator="min"):
+    """Shared input handling for ranking_metrics and its bootstrap.
+
+    Returns (yt, gains, ids, codes, size, core_ks, names, group_weight, core_kw).
+    """
     rel = np.asarray(y_true)
     _require_1d("y_true", rel)
     if len(rel) != n:
@@ -989,14 +1137,11 @@ def _ranking_setup(y_true, n, groups, group_sizes, ks, gain, no_relevant, sample
     if rel.size and not (np.isfinite(rel).all() and rel.min() >= 0):
         raise ValueError("relevance must be finite and non-negative")
     yt = np.ascontiguousarray(rel > 0, dtype=np.uint8)
-    if gain == "exponential":
-        if rel.size and rel.max() > 1000:
-            raise ValueError("relevance too large for gain='exponential'; use gain='linear'")
-        gains = np.exp2(rel) - 1.0
-    elif gain == "linear":
-        gains = rel
-    else:
+    if gain not in ("exponential", "linear"):
         raise ValueError("gain must be 'exponential' or 'linear'")
+    if gain == "exponential" and rel.size and rel.max() > 1000:
+        raise ValueError("relevance too large for gain='exponential'; use gain='linear'")
+    gains = _gain(rel, gain)
     if no_relevant not in ("skip", "zero"):
         raise ValueError("no_relevant must be 'skip' or 'zero'")
 
@@ -1041,7 +1186,63 @@ def _ranking_setup(y_true, n, groups, group_sizes, ks, gain, no_relevant, sample
             raise ValueError("sample_weight must be finite and non-negative")
         # A query's weight is the mean weight of its rows.
         group_weight = np.bincount(codes, weights=w, minlength=len(ids)) / np.maximum(size, 1)
-    return yt, np.ascontiguousarray(gains), ids, codes, size, core_ks, names, group_weight
+
+    if map_denominator not in ("min", "total"):
+        raise ValueError("map_denominator must be 'min' or 'total'")
+    core_kw = {
+        "binary": bool(gains.size == 0 or np.all((gains == 0.0) | (gains == 1.0))),
+        "map_by_total": map_denominator == "total",
+    }
+    if judgments is not None:
+        n_rel, idcg = _judged_ideal(judgments, ids, groups is None, core_ks, gain)
+        core_kw["judged_n_relevant"] = n_rel
+        core_kw["judged_idcg"] = idcg
+    return (yt, np.ascontiguousarray(gains), ids, codes, size, core_ks, names, group_weight,
+            core_kw)
+
+
+def _gain(rel: np.ndarray, gain: str) -> np.ndarray:
+    return np.exp2(rel) - 1.0 if gain == "exponential" else rel
+
+
+def _judged_ideal(judgments, ids, by_position: bool, core_ks, gain):
+    """Per-group judged relevant count and ideal DCG at each cutoff."""
+    try:
+        jg, jrel = judgments
+    except (TypeError, ValueError):
+        raise ValueError("judgments must be a pair (group ids, relevance)") from None
+    jg = np.asarray(jg)
+    jrel = np.asarray(jrel, dtype=np.float64)
+    _require_1d("judgments group ids", jg)
+    _require_1d("judgments relevance", jrel)
+    if len(jg) != len(jrel):
+        raise ValueError("judgments: group ids and relevance differ in length")
+    if jrel.size and not (np.isfinite(jrel).all() and jrel.min() >= 0):
+        raise ValueError("judgments: relevance must be finite and non-negative")
+    keep = jrel > 0
+    jg, jrel = jg[keep], jrel[keep]
+    n_groups = len(ids)
+    if by_position:  # group_sizes: judgments name groups by position
+        jg = jg.astype(np.int64)
+        found = (jg >= 0) & (jg < n_groups)
+        jcodes = jg[found]
+    else:  # ids are sorted; judged groups absent from the list are ignored
+        pos = np.searchsorted(ids, jg)
+        found = pos < n_groups
+        found[found] = ids[pos[found]] == jg[found]
+        jcodes = pos[found].astype(np.int64)
+    jgain = _gain(jrel[found], gain)
+    n_rel = np.bincount(jcodes, minlength=n_groups).astype(np.float64)
+
+    order = np.lexsort((-jgain, jcodes))
+    sc, sg = jcodes[order], jgain[order]
+    rank = np.arange(len(sc)) - np.searchsorted(sc, sc, side="left")
+    contrib = sg / np.log2(rank + 2.0)
+    idcg = np.empty((n_groups, len(core_ks)))
+    for j, k in enumerate(core_ks):
+        sel = rank < k
+        idcg[:, j] = np.bincount(sc[sel], weights=contrib[sel], minlength=n_groups)
+    return n_rel, np.ascontiguousarray(idcg.reshape(-1))
 
 
 def _ranking_summary(sums, wts, extra, names, no_relevant) -> Dict[str, float]:
@@ -1069,6 +1270,8 @@ def ranking_metrics(
     gain: str = "exponential",
     no_relevant: str = "skip",
     sample_weight: Optional[ArrayLike] = None,
+    judgments: Optional[Tuple[ArrayLike, ArrayLike]] = None,
+    map_denominator: str = "min",
     per_group: bool = False,
 ) -> Union[Dict[str, float], Tuple[Dict[str, float], Dict[str, np.ndarray]]]:
     """GAUC, NDCG, MRR, MAP, recall, precision and hit rate at several
@@ -1096,6 +1299,18 @@ def ranking_metrics(
         Weights the *averages over groups*: each group's weight is the mean
         weight of its rows (the LightGBM convention), so give every row of a
         query that query's weight. Values inside a group are not reweighted.
+    judgments : (group ids, relevance), optional
+        The complete relevance judgments (qrels), one entry per judged item,
+        for when the ranked lists can miss relevant items: first-stage
+        retrieval, or recommendations scored over a candidate subset. Recall,
+        MAP and the ideal DCG then count every judged relevant item, not only
+        those in the list, matching trec_eval and ranx. Items in the lists
+        still carry their relevance in ``y_true``. With ``group_sizes``, group
+        ids are group positions. Judged groups absent from the lists are
+        ignored.
+    map_denominator : ``"min"`` (default) divides AP@k by ``min(R, k)``, so a
+        perfect ranking scores 1; ``"total"`` divides by ``R``, the number of
+        relevant items, as trec_eval and ranx do.
     per_group : also return the per-group values.
 
     Returns
@@ -1112,16 +1327,16 @@ def ranking_metrics(
     -----
     Tied scores are averaged exactly over all orderings of the tied items,
     so a model that outputs a constant score gets chance-level metrics no
-    matter how the rows are ordered. MAP@k divides by ``min(n_relevant, k)``;
-    precision@k divides by ``k``.
+    matter how the rows are ordered. Precision@k divides by ``k``.
     """
     ys = _scores(y_score)
     _require_1d("y_score", ys)
-    yt, gains, ids, codes, size, core_ks, names, gw = _ranking_setup(
-        y_true, len(ys), groups, group_sizes, ks, gain, no_relevant, sample_weight
+    yt, gains, ids, codes, size, core_ks, names, gw, core_kw = _ranking_setup(
+        y_true, len(ys), groups, group_sizes, ks, gain, no_relevant, sample_weight,
+        judgments, map_denominator,
     )
     sums, wts, extra, rows = _core.ranking(
-        yt, gains, ys, codes, len(ids), core_ks, bool(per_group), gw
+        yt, gains, ys, codes, len(ids), core_ks, bool(per_group), gw, **core_kw
     )
     summary = _ranking_summary(sums, wts, extra, names, no_relevant)
     if not per_group:
@@ -1184,6 +1399,8 @@ def bootstrap_ranking_metrics(
     gain: str = "exponential",
     no_relevant: str = "skip",
     sample_weight: Optional[ArrayLike] = None,
+    judgments: Optional[Tuple[ArrayLike, ArrayLike]] = None,
+    map_denominator: str = "min",
     n_bootstraps: int = 1000,
     seed: int = 0,
     axis: int = -1,
@@ -1207,8 +1424,9 @@ def bootstrap_ranking_metrics(
         raise ValueError("n_bootstraps must be >= 1")
     single = ys.ndim == 1
     ys2 = ys[None, :] if single else ys
-    yt, gains, ids, codes, size, core_ks, names, gw = _ranking_setup(
-        y_true, ys2.shape[1], groups, group_sizes, ks, gain, no_relevant, sample_weight
+    yt, gains, ids, codes, size, core_ks, names, gw, core_kw = _ranking_setup(
+        y_true, ys2.shape[1], groups, group_sizes, ks, gain, no_relevant, sample_weight,
+        judgments, map_denominator,
     )
     n_groups, n_cols = len(ids), len(names)
     w_group = np.ones(n_groups) if gw is None else gw
@@ -1219,7 +1437,7 @@ def bootstrap_ranking_metrics(
     est_rows, sample_rows = [], []
     for row in ys2:
         sums, wts, extra, flat = _core.ranking(
-            yt, gains, np.ascontiguousarray(row), codes, n_groups, core_ks, True, gw
+            yt, gains, np.ascontiguousarray(row), codes, n_groups, core_ks, True, gw, **core_kw
         )
         summary = _ranking_summary(sums, wts, extra, names, no_relevant)
         est_rows.append([summary[k] for k in keys])
@@ -1366,6 +1584,319 @@ def delong_roc_auc(
         else:
             cov = np.full((k, k), _NAN)
     return DeLongResult(float(auc[0]) if single else auc, cov, m, n)
+
+
+# ---------------------------------------------------------------------------
+# Exact streaming
+# ---------------------------------------------------------------------------
+
+
+def _same_label(a: Any, b: Any) -> bool:
+    if a is None or b is None:
+        return a is b
+    try:
+        return bool(a == b)
+    except (TypeError, ValueError):
+        return False
+
+
+class BinaryAccumulator:
+    """Exact binary metrics over data that arrives in batches.
+
+    ``update`` folds a batch into a table of distinct scores with the total
+    positive and negative weight at each one. Every metric of
+    :func:`binary_metrics` depends on the data only through that table
+    (samples with equal scores are interchangeable), so :meth:`compute`
+    returns what :func:`binary_metrics` would return on all the rows at
+    once, with no binning or sketching. Unweighted counts are exact
+    integers, so ROC-AUC, average precision, PR-AUC, KS and max F1 are
+    bit-for-bit identical to the one-shot result; sums of non-integer weights
+    and the calibration losses agree up to floating-point rounding.
+
+    Memory grows with the number of distinct scores, not rows: at most
+    65,536 for float16 or bfloat16 scores, at most the number of rows for
+    float32 or float64. Accumulators from different workers combine exactly
+    with :meth:`merge` (or ``+``), in any order. They pickle, and
+    :meth:`state` / :meth:`from_state` expose the three arrays for
+    ``torch.distributed`` or MPI gathers.
+
+    Example::
+
+        acc = fastauc.BinaryAccumulator()
+        for y, s in batches:
+            acc.update(y, s)
+        acc.compute()["roc_auc"]
+    """
+
+    def __init__(self, *, pos_label: Any = None) -> None:
+        self.pos_label = pos_label
+        self.reset()
+
+    def reset(self) -> "BinaryAccumulator":
+        """Forget all data."""
+        self._score = np.empty(0)
+        self._pos = np.empty(0)
+        self._neg = np.empty(0)
+        self.n_samples = 0
+        return self
+
+    def update(self, y_true: ArrayLike, y_score: ArrayLike, *,
+               sample_weight: Optional[ArrayLike] = None) -> "BinaryAccumulator":
+        """Add a batch of labels and scores (and optional weights)."""
+        yt, ys, w = _pair(y_true, y_score, sample_weight, self.pos_label)
+        table = _core.score_table(yt, ys, w)
+        self._merge_table(*table)
+        self.n_samples += len(yt)
+        return self
+
+    def merge(self, *others: "BinaryAccumulator") -> "BinaryAccumulator":
+        """Fold other accumulators into this one, exactly."""
+        for o in others:
+            if not isinstance(o, BinaryAccumulator):
+                raise TypeError(f"cannot merge {type(o).__name__} into BinaryAccumulator")
+            if not _same_label(o.pos_label, self.pos_label):
+                raise ValueError(
+                    f"cannot merge accumulators with different pos_label "
+                    f"({self.pos_label!r} vs {o.pos_label!r}): their positive classes differ"
+                )
+        for o in others:
+            self._merge_table(o._score, o._pos, o._neg)
+            self.n_samples += o.n_samples
+        return self
+
+    def __add__(self, other: "BinaryAccumulator") -> "BinaryAccumulator":
+        return self.copy().merge(other)
+
+    def __iadd__(self, other: "BinaryAccumulator") -> "BinaryAccumulator":
+        return self.merge(other)
+
+    def copy(self) -> "BinaryAccumulator":
+        """An independent copy."""
+        return BinaryAccumulator.from_state(self.state(), pos_label=self.pos_label)
+
+    def _merge_table(self, s, p, n) -> None:
+        if len(self._score) == 0:
+            self._score, self._pos, self._neg = (np.array(a, dtype=np.float64) for a in (s, p, n))
+        elif len(s):
+            self._score, self._pos, self._neg = _core.merge_score_tables(
+                self._score, self._pos, self._neg,
+                *(np.ascontiguousarray(a, dtype=np.float64) for a in (s, p, n)),
+            )
+
+    @property
+    def n_distinct(self) -> int:
+        """Number of distinct scores held (the memory footprint, in rows of 3 floats)."""
+        return len(self._score)
+
+    def state(self) -> Dict[str, Any]:
+        """The accumulator as plain arrays: distinct scores (descending),
+        positive weight and negative weight per score, and the row count."""
+        return {"score": self._score.copy(), "pos": self._pos.copy(),
+                "neg": self._neg.copy(), "n_samples": int(self.n_samples)}
+
+    @classmethod
+    def from_state(cls, state: Dict[str, Any], *, pos_label: Any = None) -> "BinaryAccumulator":
+        """Rebuild an accumulator from :meth:`state`."""
+        acc = cls(pos_label=pos_label)
+        s, p, n = (np.ascontiguousarray(state[k], dtype=np.float64) for k in ("score", "pos", "neg"))
+        if not (s.ndim == p.ndim == n.ndim == 1 and len(s) == len(p) == len(n)):
+            raise ValueError("score, pos and neg must be 1-D arrays of equal length")
+        # Merging into an empty table validates order and distinctness.
+        acc._score, acc._pos, acc._neg = _core.merge_score_tables(s, p, n, s[:0], p[:0], n[:0])
+        acc.n_samples = int(state.get("n_samples", 0))
+        return acc
+
+    def _rows(self):
+        k = len(self._score)
+        yt = np.zeros(2 * k, dtype=np.uint8)
+        yt[:k] = 1
+        ys = np.concatenate([self._score, self._score])
+        w = np.concatenate([self._pos, self._neg])
+        return yt, ys, w
+
+    def compute(self, **kwargs: Any) -> Dict[str, float]:
+        """:func:`binary_metrics` of everything seen so far (same keyword arguments)."""
+        yt, ys, w = self._rows()
+        return binary_metrics(yt, ys, sample_weight=w, **kwargs)
+
+    def roc_auc(self) -> float:
+        yt, ys, w = self._rows()
+        return roc_auc(yt, ys, sample_weight=w)
+
+    def average_precision(self) -> float:
+        yt, ys, w = self._rows()
+        return average_precision(yt, ys, sample_weight=w)
+
+    def pr_auc(self) -> float:
+        yt, ys, w = self._rows()
+        return pr_auc(yt, ys, sample_weight=w)
+
+    def roc_curve(self, **kwargs: Any):
+        """:func:`roc_curve` of everything seen so far."""
+        yt, ys, w = self._rows()
+        return roc_curve(yt, ys, sample_weight=w, **kwargs)
+
+    def precision_recall_curve(self, **kwargs: Any):
+        """:func:`precision_recall_curve` of everything seen so far."""
+        yt, ys, w = self._rows()
+        return precision_recall_curve(yt, ys, sample_weight=w, **kwargs)
+
+    def __getstate__(self) -> Dict[str, Any]:
+        return {"state": self.state(), "pos_label": self.pos_label}
+
+    def __setstate__(self, d: Dict[str, Any]) -> None:
+        other = BinaryAccumulator.from_state(d["state"], pos_label=d["pos_label"])
+        self.__dict__.update(other.__dict__)
+
+    def __repr__(self) -> str:
+        return (f"BinaryAccumulator(n_samples={self.n_samples}, n_distinct={self.n_distinct}, "
+                f"positives={float(self._pos.sum()):g}, negatives={float(self._neg.sum()):g})")
+
+
+# ---------------------------------------------------------------------------
+# Paired significance tests
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class PairedTestResult:
+    """Outcome of :func:`paired_test`.
+
+    ``mean_difference`` is ``mean(a - b)`` over the ``n`` pairs where both
+    values are defined; ``p_value`` follows ``alternative``. For the
+    randomization test, ``exact`` tells whether every sign pattern was
+    enumerated (otherwise ``n_resamples`` were drawn).
+    """
+
+    mean_difference: float
+    p_value: float
+    n: int
+    method: str
+    alternative: str
+    statistic: float
+    exact: bool
+
+
+def _betainc(a: float, b: float, x: float) -> float:
+    """Regularised incomplete beta I_x(a, b) by Lentz's continued fraction."""
+    if x <= 0.0:
+        return 0.0
+    if x >= 1.0:
+        return 1.0
+    log_front = (math.lgamma(a + b) - math.lgamma(a) - math.lgamma(b)
+                 + a * math.log(x) + b * math.log1p(-x))
+    if x > (a + 1.0) / (a + b + 2.0):  # the fraction converges fast on this side
+        return 1.0 - _betainc(b, a, 1.0 - x)
+    tiny = 1e-300
+    c, d = 1.0, 1.0 - (a + b) * x / (a + 1.0)
+    d = 1.0 / (d if abs(d) > tiny else tiny)
+    f = d
+    for m in range(1, 10_000):
+        for num in (m * (b - m) * x / ((a + 2 * m - 1) * (a + 2 * m)),
+                    -(a + m) * (a + b + m) * x / ((a + 2 * m) * (a + 2 * m + 1))):
+            d = 1.0 + num * d
+            d = 1.0 / (d if abs(d) > tiny else tiny)
+            c = 1.0 + num / c
+            c = c if abs(c) > tiny else tiny
+            f *= c * d
+        if abs(c * d - 1.0) < 1e-16:
+            break
+    return math.exp(log_front) * f / a
+
+
+def _t_sf(t: float, df: float) -> float:
+    """P(T > t) for Student's t with ``df`` degrees of freedom."""
+    tail = 0.5 * _betainc(0.5 * df, 0.5, df / (df + t * t))
+    return tail if t > 0 else 1.0 - tail
+
+
+def paired_test(
+    a: ArrayLike,
+    b: ArrayLike,
+    *,
+    method: str = "randomization",
+    alternative: str = "two-sided",
+    n_resamples: int = 10_000,
+    seed: int = 0,
+) -> PairedTestResult:
+    """Is system A better than system B on the same queries (or users, or samples)?
+
+    ``a`` and ``b`` are per-unit values of one metric for the two systems,
+    such as the ``per_group`` output of :func:`ranking_metrics` or of
+    :func:`roc_auc_ap_grouped` computed on the same groups. Pairs where
+    either value is NaN (an undefined metric) are dropped.
+
+    ``method``:
+
+    * ``"randomization"`` (default): the paired sign-flip test (Fisher's
+      randomization test, as used in IR evaluation). Exact when
+      ``2**n <= n_resamples``; otherwise Monte Carlo with
+      ``p = (1 + count) / (1 + n_resamples)``, deterministic for a given
+      ``seed`` and independent of the thread count.
+    * ``"t"``: the paired t-test (no scipy needed).
+
+    ``alternative`` is ``"two-sided"``, ``"greater"`` (A > B) or ``"less"``.
+    Correct for multiple comparisons with :func:`holm`.
+    """
+    x = np.asarray(a, dtype=np.float64).ravel()
+    y = np.asarray(b, dtype=np.float64).ravel()
+    if x.shape != y.shape:
+        raise ValueError(f"a and b must have the same length ({len(x)} vs {len(y)})")
+    if alternative not in ("two-sided", "greater", "less"):
+        raise ValueError("alternative must be 'two-sided', 'greater' or 'less'")
+    keep = ~(np.isnan(x) | np.isnan(y))
+    d = np.ascontiguousarray(x[keep] - y[keep])
+    n = len(d)
+    mean = float(d.mean()) if n else _NAN
+    if method == "randomization":
+        if n == 0:
+            return PairedTestResult(mean, _NAN, 0, method, alternative, _NAN, True)
+        if int(n_resamples) < 1:
+            raise ValueError("n_resamples must be at least 1")
+        patterns, two, greater, less, exact = _core.sign_flip(d, int(n_resamples), int(seed) & (2**64 - 1))
+        count = {"two-sided": two, "greater": greater, "less": less}[alternative]
+        p = count / patterns if exact else (1 + count) / (1 + patterns)
+        return PairedTestResult(mean, float(min(p, 1.0)), n, method, alternative, mean, bool(exact))
+    if method == "t":
+        if n < 2:
+            return PairedTestResult(mean, _NAN, n, method, alternative, _NAN, False)
+        sd = float(d.std(ddof=1))
+        if sd == 0.0:
+            t = 0.0 if mean == 0.0 else math.copysign(math.inf, mean)
+        else:
+            t = mean / (sd / math.sqrt(n))
+        df = n - 1
+        if math.isinf(t):
+            upper = 0.0 if t > 0 else 1.0
+        elif t == 0.0 and sd == 0.0:
+            upper = _NAN
+        else:
+            upper = _t_sf(t, df)
+        p = {"greater": upper, "less": 1.0 - upper,
+             "two-sided": 2.0 * min(upper, 1.0 - upper)}[alternative]
+        return PairedTestResult(mean, float(min(p, 1.0)), n, method, alternative, float(t), False)
+    raise ValueError("method must be 'randomization' or 't'")
+
+
+def holm(p_values: ArrayLike) -> np.ndarray:
+    """Holm-Bonferroni adjusted p-values (same order as the input).
+
+    Controls the family-wise error rate for any dependence between tests.
+    Reject hypothesis ``i`` at level ``alpha`` when ``adjusted[i] <= alpha``.
+    NaN p-values stay NaN and do not count towards the number of tests.
+    """
+    p = np.asarray(p_values, dtype=np.float64)
+    out = np.full(p.shape, _NAN)
+    flat = p.ravel()
+    ok = np.flatnonzero(~np.isnan(flat))
+    m = len(ok)
+    if m:
+        order = ok[np.argsort(flat[ok], kind="stable")]
+        adj = np.minimum(1.0, np.maximum.accumulate((m - np.arange(m)) * flat[order]))
+        res = out.ravel()
+        res[order] = adj
+        out = res.reshape(p.shape)
+    return out
 
 
 def num_threads() -> int:

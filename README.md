@@ -2,9 +2,11 @@
 
 [![CI](https://github.com/hen-ml/fastauc/actions/workflows/CI.yml/badge.svg)](https://github.com/hen-ml/fastauc/actions/workflows/CI.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![PyPI](https://img.shields.io/pypi/v/pyfastauc.svg)](https://pypi.org/project/pyfastauc/)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](pyproject.toml)
+[![Docs](https://img.shields.io/badge/docs-hen--ml.github.io%2Ffastauc-blue.svg)](https://hen-ml.github.io/fastauc/)
 
-Fast, correct classification, calibration and ranking metrics for Python, written in Rust.
+Exact, fast classification, calibration and ranking metrics for Python, written in Rust.
 
 ## Your offline ranking metrics may be inflated by row order
 
@@ -30,6 +32,11 @@ interchangeable and every top-k metric is the exact average over all their
 orderings, in closed form: no random tie-breaking, no seed, the same answer on
 every run. See [Tied scores](#tied-scores-never-leak-row-order).
 
+"Exact" runs through the whole library: string ids are grouped by an exact
+hash table (never by a hash that could merge two ids), the streaming
+accumulator keeps every distinct score instead of a sketch, and the
+scikit-learn drop-in is tested function by function against scikit-learn.
+
 ## What you get
 
 ```
@@ -49,11 +56,17 @@ The package installs as `pyfastauc` and imports as `fastauc`.
 | `roc_curve`, `precision_recall_curve`, `calibration_curve` | curve points for plotting, same output as scikit-learn |
 | `precision_at_recall`, `recall_at_precision`, `tpr_at_fpr`, `lift_at`, `ks_statistic`, `max_f1` | operating points with their thresholds |
 | `log_loss`, `brier_score`, `normalized_entropy`, `calibration_ratio`, `expected_calibration_error` | individual calibration metrics |
+| `roc_auc_multiclass`, `partial_roc_auc` | one-vs-rest and one-vs-one multiclass AUC; AUC up to a maximum FPR |
+| `paired_test`, `holm` | randomization test or paired t-test on per-query values; Holm correction |
+| `BinaryAccumulator` | exact streaming metrics, mergeable across workers |
+| `fastauc.sklearn` | drop-in `roc_auc_score`, `average_precision_score`, `ndcg_score`, `log_loss`, ... |
 
 - Same numbers as scikit-learn where scikit-learn has the metric, including tied scores and sample weights.
 - Multithreaded, GIL released, no JIT warm-up. NumPy is the only dependency.
-- One wheel per platform covers every CPython from 3.9.
+- One wheel per platform covers every CPython from 3.9, plus a wheel for free-threaded 3.14t.
 - Results are bit-identical regardless of thread count and of input row order.
+
+Full documentation: https://hen-ml.github.io/fastauc/
 
 ## Quick start
 
@@ -123,11 +136,44 @@ fastauc.ranking_metrics(relevance, s, query_id, ks=(1, 5, 10, None))
 ```
 
 - `relevance` is binary or graded (non-negative). An item counts as relevant when it is `> 0`; grades only change NDCG (`gain="exponential"` or `"linear"`).
-- Pass ids via `groups` (any row order, any dtype), or `group_sizes=` for data already laid out query by query, as LightGBM and XGBoost expect. Integer ids in a compact range and `group_sizes` are the fast paths; string or sparse ids are sorted first.
+- Pass ids via `groups` (any row order, any dtype), or `group_sizes=` for data already laid out query by query, as LightGBM and XGBoost expect. Integer ids in a compact range and `group_sizes` are the fast paths. String ids go through an exact hash table in Rust (ids compared byte for byte, so two ids are never merged), 4 to 6 times faster than `np.unique`.
 - `gauc` is weighted by group size; `gauc_macro` is the plain mean over groups.
 - Queries with no relevant item are left out of the averages (`no_relevant="zero"` counts them as 0 instead). `n_groups_ranked` tells you how many were used.
 - `sample_weight` weights the average over queries: a query's weight is the mean weight of its rows (the LightGBM convention).
 - `per_group=True` also returns every per-query value.
+- When the lists can miss relevant items (first-stage retrieval, candidate subsets), pass the complete judgments: `judgments=(qrels_query_id, qrels_relevance)`. Recall, MAP and the ideal DCG then count every judged relevant item. With `map_denominator="total"` and `gain="linear"` the results match trec_eval.
+
+### Drop-in for `sklearn.metrics`
+
+```python
+from sklearn import metrics             # before
+from fastauc import sklearn as metrics  # after
+```
+
+`roc_auc_score` (binary, `max_fpr`, multiclass `ovr`/`ovo`, multilabel, every
+`average`), `average_precision_score`, `ndcg_score`, `dcg_score`,
+`roc_curve`, `precision_recall_curve`, `auc`, `log_loss` and
+`brier_score_loss` take scikit-learn's arguments and return its values, with
+the same warnings and error messages; the test suite checks each one. The one
+deliberate difference: `ndcg_score(ignore_ties=True)` still averages ties
+exactly, because scikit-learn's result then depends on row order.
+
+### Streaming and distributed evaluation
+
+```python
+acc = fastauc.BinaryAccumulator()
+for y, s in batches:
+    acc.update(y, s)
+acc.compute()                          # same keys as binary_metrics
+total = acc_worker_0 + acc_worker_1    # merge across workers, any order
+```
+
+Exact, not binned: the accumulator keeps the table of distinct scores with
+their positive and negative counts, which is all any threshold metric
+depends on. Unweighted results are bit-for-bit identical to computing on all
+rows at once. Memory grows with distinct scores (at most 65,536 for float16
+or bfloat16 scores). Accumulators pickle, and `state()`/`from_state()`
+expose plain arrays for `torch.distributed` or MPI gathers.
 
 ### Curves for plotting
 
@@ -165,6 +211,14 @@ res = fastauc.roc_auc_ap_grouped(y, s, user_id)
 res.groups, res.roc_auc, res.average_precision, res.n_pos, res.n_neg  # aligned arrays
 res.mean("roc_auc")                      # size-weighted GAUC
 res.mean("roc_auc", weight="uniform")    # macro average over groups
+```
+
+### Multiclass and partial AUC
+
+```python
+fastauc.roc_auc_multiclass(y, P)                     # one-vs-rest, macro; P is (n_samples, n_classes)
+fastauc.roc_auc_multiclass(y, P, multi_class="ovo")  # Hand and Till
+fastauc.partial_roc_auc(y, s, max_fpr=0.1)           # McClish-standardized, as scikit-learn
 ```
 
 ### Confidence intervals
@@ -226,6 +280,20 @@ r = fastauc.bootstrap_ranking_metrics(relevance, np.stack([scores_a, scores_b]),
 diff, (low, high), p_value = r.compare(0, 1, metric="ndcg@10")
 ```
 
+For the per-query significance tests used in IR evaluation, compare the
+per-query values directly:
+
+```python
+_, a = fastauc.ranking_metrics(rel, scores_a, query_id, ks=(10,), per_group=True)
+_, b = fastauc.ranking_metrics(rel, scores_b, query_id, ks=(10,), per_group=True)
+fastauc.paired_test(a["ndcg@10"], b["ndcg@10"])              # randomization (sign-flip) test
+fastauc.paired_test(a["ndcg@10"], b["ndcg@10"], method="t")  # paired t-test, no scipy needed
+fastauc.holm([p1, p2, p3])                                   # several comparisons
+```
+
+The randomization test enumerates every sign pattern when that is feasible
+(an exact p-value) and otherwise samples deterministically from `seed`.
+
 ## Use it inside your training loop
 
 Runnable scripts are in [`examples/`](examples).
@@ -282,6 +350,15 @@ every metric is unchanged under row permutation, including the adversarial
 With no ties these are the textbook definitions, and NDCG matches
 `sklearn.metrics.ndcg_score` (which also averages ties).
 
+The tie-aware forms of the IR measures go back to McSherry and Najork,
+[*Computing Information Retrieval Performance Measures Efficiently in the
+Presence of Tied Scores*](https://doi.org/10.1007/978-3-540-78646-7_38)
+(ECIR 2008); Cabanac et al.,
+[*Tie-Breaking Bias*](https://doi.org/10.1007/978-3-642-15998-5_13)
+(CLEF 2010), showed that trec_eval's tie-breaking by document name changes
+TREC results. fastauc applies the same principle to every metric it
+computes, including GAUC, bootstrap replicates and streaming.
+
 ## How it compares
 
 **Tie handling.** `python benchmarks/tie_leak.py` runs other libraries on
@@ -318,10 +395,9 @@ scikit-learn has no GAUC, MRR or MAP@k; ranx has no AUC or calibration
 metrics; torchmetrics and TorchRec need PyTorch. As far as we know, none of
 them bootstraps by user or query.
 
-**What they have that fastauc does not.** GPU and distributed evaluation
-(torchmetrics, TorchRec); multiclass and partial AUC (scikit-learn); TREC
-file formats, run fusion, per-query significance tests and many more IR
-metrics (ranx).
+**What they have that fastauc does not.** GPU evaluation (torchmetrics,
+TorchRec); multiclass precision, recall and F1 (scikit-learn); TREC file
+formats, run fusion and many more IR metrics (ranx).
 
 ## Behaviour to know about
 
@@ -331,17 +407,18 @@ metrics (ranx).
 | `NaN` in scores | raises `ValueError` | raises |
 | `±inf` in scores | ranked normally | raises |
 | Labels other than `0/1` or `bool` | raises; pass `pos_label=` | infers the positive class |
-| Multiclass, `max_fpr`, `average=` | not supported | supported |
+| Multiclass, `max_fpr` | `roc_auc_multiclass`, `partial_roc_auc` | arguments of `roc_auc_score` |
 | 2-D layout | `(n_tasks, n_samples)`; `axis=0` for the other | `(n_samples, n_tasks)` |
 
 Returning `NaN` rather than raising is deliberate: in a batch, a group-by, or
 a bootstrap, one degenerate slice should not abort the whole computation.
+For scikit-learn's exact behaviour, warnings included, use `fastauc.sklearn`.
 
 Other notes:
 
 - Inputs are converted to `uint8` labels and `float64` scores; pass those dtypes, C-contiguous, to avoid a copy.
 - Bootstrap results depend only on `seed`. Each replicate has its own independently seeded xoshiro256++ stream.
-- MAP@k divides by `min(n_relevant, k)`; precision@k divides by `k`.
+- MAP@k divides by `min(n_relevant, k)` (`map_denominator="total"` divides by `n_relevant`, as trec_eval and ranx do); precision@k divides by `k`.
 - Up to 2^32 - 1 samples per vector.
 - ERR (expected reciprocal rank) is not included.
 
@@ -370,6 +447,16 @@ All ranking metrics at four cutoffs on the same 1M rows take 0.052 s, the same
 as NDCG@10 alone. The `binary_metrics` baseline is scikit-learn's ROC-AUC,
 average precision, log loss and Brier, plus KS and max F1 from its curve
 functions.
+
+The drop-in module on the same calls (`python benchmarks/bench_sklearn.py`):
+`roc_auc_score` and `average_precision_score` on 1M rows are 5x faster,
+one-vs-one multiclass AUC 4x, and `ndcg_score(k=10)` on 10,000 queries 11x.
+
+Against a hand-written, tie-aware NDCG@10 kernel in Numba (in
+`benchmarks/evidence.py`), on one thread after JIT warm-up, medians of 7
+runs: `ranking_metrics`, computing all six ranking metrics plus GAUC, takes
+0.85 ms on 2,110 lists of 10 (Numba: 1.29 ms) and 7.8 ms on 8,956 ragged
+pools (Numba: 9.3 ms), with no 3 s compile on first call.
 
 Against ranx 0.3.21, a Numba-based ranking evaluation library
 (`python benchmarks/bench_vs_others.py`; NDCG@10 + MRR@10 + MAP@10 on
@@ -413,13 +500,20 @@ pytest
 
 Requires a Rust toolchain (1.85+). The native code is in `src/lib.rs`
 (no `unsafe`); input validation and the public API are in
-`python/fastauc/__init__.py`.
+`python/fastauc/__init__.py`, and the scikit-learn drop-in in
+`python/fastauc/sklearn.py`. For a free-threaded build, run
+`maturin develop --release --no-default-features` in a Python 3.14t
+environment.
 
 ## Releasing
 
-1. On PyPI, add a trusted publisher for project `pyfastauc`: owner `hen-ml`, repository `fastauc`, workflow `CI.yml`, environment `pypi`. For a brand-new project use a "pending publisher" (PyPI account settings, Publishing).
-2. Bump the version in `Cargo.toml`, `pyproject.toml` and `python/fastauc/__init__.py`.
-3. `git tag v0.1.0 && git push --tags`. CI builds wheels for Linux (glibc and musl, x86-64 and aarch64), macOS (Intel and Apple silicon) and Windows, runs the tests, and publishes.
+1. PyPI trusted publishers (once): project `pyfastauc`, and project `fastauc` for the alias in `redirect/` (a "pending publisher" until its first upload). Both: owner `hen-ml`, repository `fastauc`, workflow `CI.yml`, environment `pypi`.
+2. Bump the version in `Cargo.toml`, `pyproject.toml`, `python/fastauc/__init__.py` and `redirect/pyproject.toml` (its version and its `pyfastauc==` pin; CI checks they agree).
+3. `git tag vX.Y.Z && git push --tags`. CI builds abi3 wheels for Linux (glibc and musl, x86-64 and aarch64), macOS (Intel and Apple silicon) and Windows, free-threaded 3.14t wheels, runs the tests, publishes `pyfastauc`, then publishes the `fastauc` alias.
+4. conda-forge: fill in the sdist hash in `conda-recipe/meta.yaml` and submit it to conda-forge/staged-recipes (first release only; afterwards the feedstock's bot opens version bumps).
+
+Documentation is built from `docs/` by the Docs workflow and published to
+GitHub Pages from `main` (Settings, Pages, Source: GitHub Actions).
 
 ## License
 

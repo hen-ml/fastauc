@@ -1,5 +1,8 @@
 # Based on `maturin generate-ci github` (maturin 1.16), trimmed to tier-1 targets.
-# Wheels are abi3, so each job produces one wheel that covers CPython >= 3.9.
+# Regular wheels are abi3, so each job produces one wheel that covers
+# CPython >= 3.9. Free-threaded CPython 3.14t has no stable ABI, so each job
+# also builds a 3.14t wheel with `--no-default-features` (abi3 off), as
+# maturin's own generated CI does.
 name: CI
 
 on:
@@ -32,6 +35,13 @@ jobs:
           args: --release --out dist
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
           manylinux: ${{ matrix.manylinux }}
+      - name: Build free-threaded wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist --no-default-features -i python3.14t
+          sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
+          manylinux: ${{ matrix.manylinux }}
       - name: Upload wheels
         uses: actions/upload-artifact@v6
         with:
@@ -43,6 +53,22 @@ jobs:
           set -e
           python -m venv .venv
           source .venv/bin/activate
+          pip install pyfastauc --no-index --no-deps --find-links dist
+          pip install numpy scikit-learn scipy pytest
+          pytest
+      - uses: actions/setup-python@v6
+        if: ${{ matrix.target == 'x86_64' && matrix.manylinux == 'auto' }}
+        with:
+          python-version: "3.14t"
+      - name: pytest (free-threaded, GIL disabled)
+        if: ${{ matrix.target == 'x86_64' && matrix.manylinux == 'auto' }}
+        env:
+          PYTHON_GIL: "0"
+        run: |
+          set -e
+          python -m venv .venv-ft
+          source .venv-ft/bin/activate
+          python -c "import sysconfig; assert sysconfig.get_config_var('Py_GIL_DISABLED')"
           pip install pyfastauc --no-index --no-deps --find-links dist
           pip install numpy scikit-learn scipy pytest
           pytest
@@ -61,11 +87,6 @@ jobs:
           target: x64
           args: --release --out dist
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
-      - name: Upload wheels
-        uses: actions/upload-artifact@v6
-        with:
-          name: wheels-windows-x64
-          path: dist
       - name: pytest
         shell: bash
         run: |
@@ -75,6 +96,21 @@ jobs:
           pip install pyfastauc --no-index --no-deps --find-links dist
           pip install numpy scikit-learn scipy pytest
           pytest
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14t"
+          architecture: x64
+      - name: Build free-threaded wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: x64
+          args: --release --out dist --no-default-features -i python3.14t
+          sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
+      - name: Upload wheels
+        uses: actions/upload-artifact@v6
+        with:
+          name: wheels-windows-x64
+          path: dist
 
   macos:
     runs-on: ${{ matrix.platform.runner }}
@@ -97,11 +133,6 @@ jobs:
           target: ${{ matrix.platform.target }}
           args: --release --out dist
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
-      - name: Upload wheels
-        uses: actions/upload-artifact@v6
-        with:
-          name: wheels-macos-${{ matrix.platform.target }}
-          path: dist
       - name: pytest
         run: |
           set -e
@@ -110,6 +141,32 @@ jobs:
           pip install pyfastauc --no-index --no-deps --find-links dist
           pip install numpy scikit-learn scipy pytest
           pytest
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14t"
+      - name: Build free-threaded wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.platform.target }}
+          args: --release --out dist --no-default-features -i python3.14t
+          sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
+      - name: pytest (free-threaded, GIL disabled)
+        if: ${{ matrix.platform.target == 'aarch64' }}
+        env:
+          PYTHON_GIL: "0"
+        run: |
+          set -e
+          python -m venv .venv-ft
+          source .venv-ft/bin/activate
+          python -c "import sysconfig; assert sysconfig.get_config_var('Py_GIL_DISABLED')"
+          pip install pyfastauc --no-index --no-deps --find-links dist
+          pip install numpy scikit-learn scipy pytest
+          pytest
+      - name: Upload wheels
+        uses: actions/upload-artifact@v6
+        with:
+          name: wheels-macos-${{ matrix.platform.target }}
+          path: dist
 
   sdist:
     runs-on: ubuntu-latest
@@ -126,6 +183,32 @@ jobs:
           name: wheels-sdist
           path: dist
 
+  redirect:
+    name: Alias package (fastauc)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Alias version must equal the main package version
+        run: |
+          python - <<'EOF'
+          import tomllib
+          main = tomllib.load(open("pyproject.toml", "rb"))["project"]["version"]
+          alias = tomllib.load(open("redirect/pyproject.toml", "rb"))["project"]
+          assert alias["version"] == main, (alias["version"], main)
+          assert alias["dependencies"] == [f"pyfastauc=={main}"], alias["dependencies"]
+          EOF
+      - name: Build
+        run: |
+          pip install build
+          python -m build redirect --outdir redirect-dist
+      - uses: actions/upload-artifact@v6
+        with:
+          name: redirect
+          path: redirect-dist
+
   release:
     name: Publish to PyPI
     runs-on: ubuntu-latest
@@ -139,6 +222,25 @@ jobs:
         with:
           pattern: wheels-*
           merge-multiple: true
+          path: dist
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  release-redirect:
+    # Runs after the main release, so `pyfastauc==<version>` already exists.
+    # Needs a second PyPI trusted publisher: project `fastauc`, same owner,
+    # repository, workflow and environment. If it is missing, only this job fails.
+    name: Publish the fastauc alias to PyPI
+    runs-on: ubuntu-latest
+    if: ${{ startsWith(github.ref, 'refs/tags/') }}
+    needs: [release, redirect]
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: redirect
           path: dist
       - name: Publish
         uses: pypa/gh-action-pypi-publish@release/v1
