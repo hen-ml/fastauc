@@ -43,7 +43,7 @@ jobs:
           set -e
           python -m venv .venv
           source .venv/bin/activate
-          pip install fastauc --no-index --no-deps --find-links dist
+          pip install pyfastauc --no-index --no-deps --find-links dist
           pip install numpy scikit-learn scipy pytest
           pytest
 
@@ -72,7 +72,7 @@ jobs:
           set -e
           python -m venv .venv
           source .venv/Scripts/activate
-          pip install fastauc --no-index --no-deps --find-links dist
+          pip install pyfastauc --no-index --no-deps --find-links dist
           pip install numpy scikit-learn scipy pytest
           pytest
 
@@ -107,7 +107,7 @@ jobs:
           set -e
           python -m venv .venv
           source .venv/bin/activate
-          pip install fastauc --no-index --no-deps --find-links dist
+          pip install pyfastauc --no-index --no-deps --find-links dist
           pip install numpy scikit-learn scipy pytest
           pytest
 

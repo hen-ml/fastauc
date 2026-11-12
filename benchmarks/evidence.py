@@ -1,6 +1,6 @@
 """Reproducible evidence that fastauc is correct and fast, on synthetic data.
 
-    pip install fastauc scikit-learn          # numba optional, for one extra baseline
+    pip install pyfastauc scikit-learn        # numba optional, for one extra baseline
     python benchmarks/evidence.py             # writes evidence_report.txt and evidence.json
 
 Two synthetic workloads mirror common offline ranking evaluations:

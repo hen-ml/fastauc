@@ -33,8 +33,10 @@ every run. See [Tied scores](#tied-scores-never-leak-row-order).
 ## What you get
 
 ```
-pip install fastauc
+pip install pyfastauc
 ```
+
+The package installs as `pyfastauc` and imports as `fastauc`.
 
 | Function | Returns |
 |---|---|
@@ -415,7 +417,7 @@ Requires a Rust toolchain (1.85+). The native code is in `src/lib.rs`
 
 ## Releasing
 
-1. On PyPI, add a trusted publisher: owner `hen-ml`, repository `fastauc`, workflow `CI.yml`, environment `pypi`. For a brand-new project use a "pending publisher" (PyPI account settings, Publishing).
+1. On PyPI, add a trusted publisher for project `pyfastauc`: owner `hen-ml`, repository `fastauc`, workflow `CI.yml`, environment `pypi`. For a brand-new project use a "pending publisher" (PyPI account settings, Publishing).
 2. Bump the version in `Cargo.toml`, `pyproject.toml` and `python/fastauc/__init__.py`.
 3. `git tag v0.1.0 && git push --tags`. CI builds wheels for Linux (glibc and musl, x86-64 and aarch64), macOS (Intel and Apple silicon) and Windows, runs the tests, and publishes.
 
