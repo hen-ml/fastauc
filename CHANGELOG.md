@@ -2,7 +2,7 @@
 
 ## 0.1.0
 
-Initial release.
+Initial release, published on PyPI as `pyfastauc` (imported as `fastauc`).
 
 - `roc_auc`, `average_precision`, `roc_auc_ap`: single-pair metrics matching scikit-learn, with `sample_weight` and `pos_label`.
 - `pr_auc`: trapezoidal area under the precision-recall curve, matching `sklearn.metrics.auc(recall, precision)`, kept distinct from average precision.
