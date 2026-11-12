@@ -35,8 +35,8 @@ def main():
     y = rng.integers(0, 2, n)
     s = rng.random(n) + 0.2 * y
     task = f"ROC-AUC + AP, N={n:,}"
-    ref = fastauc.roc_pr_auc(y, s)
-    line(task, "fastauc", best(lambda: fastauc.roc_pr_auc(y, s)))
+    ref = fastauc.roc_auc_ap(y, s)
+    line(task, "fastauc", best(lambda: fastauc.roc_auc_ap(y, s)))
     try:
         from sklearn.metrics import average_precision_score, roc_auc_score
 

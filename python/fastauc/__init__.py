@@ -1,8 +1,16 @@
-"""fastauc: fast, multithreaded ROC-AUC and PR-AUC (average precision).
+"""fastauc: fast, multithreaded classification, calibration and ranking metrics.
 
 Results match ``sklearn.metrics.roc_auc_score`` and
 ``sklearn.metrics.average_precision_score`` for binary targets, including
 tied scores and sample weights.
+
+Two summaries of the precision-recall curve are kept apart by name:
+
+* **average precision** (:func:`average_precision`): the step-wise area
+  ``sum(dR * P)``. This is the default everywhere a PR summary is reported.
+* **PR-AUC** (:func:`pr_auc`): the trapezoidal area
+  ``sum(dR * (P + P_prev) / 2)``, starting from ``(R, P) = (0, 1)``, as
+  computed by ``sklearn.metrics.auc(recall, precision)``.
 
 Conventions
 -----------
@@ -38,10 +46,11 @@ __version__ = "0.1.0"
 __all__ = [
     "roc_auc",
     "average_precision",
-    "roc_pr_auc",
-    "roc_pr_auc_batch",
-    "roc_pr_auc_grouped",
-    "bootstrap_roc_pr_auc",
+    "pr_auc",
+    "roc_auc_ap",
+    "roc_auc_ap_batch",
+    "roc_auc_ap_grouped",
+    "bootstrap_roc_auc_ap",
     "binary_metrics",
     "ks_statistic",
     "max_f1",
@@ -116,7 +125,7 @@ def _require_1d(name: str, a: np.ndarray) -> None:
     if a.ndim != 1:
         raise ValueError(
             f"{name} must be 1-D, got shape {a.shape}; "
-            "use roc_pr_auc_batch for 2-D inputs"
+            "use roc_auc_ap_batch for 2-D inputs"
         )
 
 
@@ -184,7 +193,7 @@ def _paired_compare(s: np.ndarray, est: Any, a: int, b: int, level: float):
 # ---------------------------------------------------------------------------
 
 
-def roc_pr_auc(
+def roc_auc_ap(
     y_true: ArrayLike,
     y_score: ArrayLike,
     *,
@@ -200,7 +209,7 @@ def roc_pr_auc(
     yt, ys = _labels(y_true, pos_label), _scores(y_score)
     _require_1d("y_true", yt)
     _require_1d("y_score", ys)
-    return _core.roc_pr_auc(yt, ys, _weights(sample_weight))
+    return _core.roc_auc_ap(yt, ys, _weights(sample_weight))
 
 
 def roc_auc(
@@ -211,7 +220,7 @@ def roc_auc(
     pos_label: Any = None,
 ) -> float:
     """Area under the ROC curve. Equivalent to ``sklearn.metrics.roc_auc_score``."""
-    return roc_pr_auc(y_true, y_score, sample_weight=sample_weight, pos_label=pos_label)[0]
+    return roc_auc_ap(y_true, y_score, sample_weight=sample_weight, pos_label=pos_label)[0]
 
 
 def average_precision(
@@ -221,11 +230,39 @@ def average_precision(
     sample_weight: Optional[ArrayLike] = None,
     pos_label: Any = None,
 ) -> float:
-    """Average precision (step-wise PR-AUC).
+    """Average precision: the step-wise area under the precision-recall curve,
+    ``sum over thresholds of (R_k - R_{k-1}) * P_k``.
 
-    Equivalent to ``sklearn.metrics.average_precision_score``.
+    Equivalent to ``sklearn.metrics.average_precision_score``. Each recall
+    step is credited with the precision reached at its end, so no point that
+    no threshold achieves is ever used. Prefer this over :func:`pr_auc`.
     """
-    return roc_pr_auc(y_true, y_score, sample_weight=sample_weight, pos_label=pos_label)[1]
+    return roc_auc_ap(y_true, y_score, sample_weight=sample_weight, pos_label=pos_label)[1]
+
+
+def pr_auc(
+    y_true: ArrayLike,
+    y_score: ArrayLike,
+    *,
+    sample_weight: Optional[ArrayLike] = None,
+    pos_label: Any = None,
+) -> float:
+    """PR-AUC: the trapezoidal area under the precision-recall curve,
+    ``sum over thresholds of (R_k - R_{k-1}) * (P_k + P_{k-1}) / 2``, starting
+    from ``(R, P) = (0, 1)``.
+
+    Equivalent to ``sklearn.metrics.auc(recall, precision)`` on the output of
+    ``sklearn.metrics.precision_recall_curve`` (and of
+    :func:`precision_recall_curve`). It walks the same curve as
+    :func:`average_precision` and differs only in joining consecutive points
+    with straight lines. Straight lines in precision-recall space are not
+    achievable by any classifier (Davis and Goadrich, 2006), and the starting
+    point ``(0, 1)`` is credited even when the top-scored item is negative, so
+    this can overstate performance. Use it to reproduce numbers from pipelines
+    that compute "PR-AUC" with the trapezoidal rule; report
+    :func:`average_precision` otherwise. ``NaN`` without positives.
+    """
+    return _core.binary_summary(*_pair(y_true, y_score, sample_weight, pos_label))[6]
 
 
 # ---------------------------------------------------------------------------
@@ -233,7 +270,7 @@ def average_precision(
 # ---------------------------------------------------------------------------
 
 
-def roc_pr_auc_batch(
+def roc_auc_ap_batch(
     y_true: ArrayLike,
     y_score: ArrayLike,
     *,
@@ -292,7 +329,7 @@ def roc_pr_auc_batch(
 
 @dataclass(frozen=True)
 class GroupedResult:
-    """Per-group metrics from :func:`roc_pr_auc_grouped`.
+    """Per-group metrics from :func:`roc_auc_ap_grouped`.
 
     All arrays are aligned with ``groups`` (the sorted unique group ids).
     """
@@ -327,7 +364,7 @@ class GroupedResult:
         return float(np.average(values[ok], weights=w[ok]))
 
 
-def roc_pr_auc_grouped(
+def roc_auc_ap_grouped(
     y_true: ArrayLike,
     y_score: ArrayLike,
     groups: ArrayLike,
@@ -357,7 +394,7 @@ def roc_pr_auc_grouped(
 
 @dataclass(frozen=True)
 class BootstrapResult:
-    """Bootstrap distribution from :func:`bootstrap_roc_pr_auc`.
+    """Bootstrap distribution from :func:`bootstrap_roc_auc_ap`.
 
     Attributes
     ----------
@@ -405,7 +442,7 @@ class BootstrapResult:
         )
 
 
-def bootstrap_roc_pr_auc(
+def bootstrap_roc_auc_ap(
     y_true: ArrayLike,
     y_score: ArrayLike,
     *,
@@ -895,8 +932,9 @@ def binary_metrics(
 ) -> Dict[str, float]:
     """Discrimination and calibration metrics for one model, one sort.
 
-    Returns a dict with ``roc_auc``, ``average_precision``, ``ks``,
-    ``ks_threshold``, ``f1_max``, ``f1_threshold``, ``prevalence`` and the
+    Returns a dict with ``roc_auc``, ``average_precision``, ``pr_auc``
+    (trapezoidal; see :func:`pr_auc`), ``ks``, ``ks_threshold``, ``f1_max``,
+    ``f1_threshold``, ``prevalence`` and the
     keys of :func:`calibration_metrics`.
 
     ``calibration`` controls the calibration block: ``None`` (default)
@@ -905,10 +943,11 @@ def binary_metrics(
     are not; ``False`` skips it.
     """
     yt, ys, w = _pair(y_true, y_score, sample_weight, pos_label)
-    roc, ap, ks, ks_thr, f1, f1_thr = _core.binary_summary(yt, ys, w)
+    roc, ap, ks, ks_thr, f1, f1_thr, pr = _core.binary_summary(yt, ys, w)
     out: Dict[str, float] = {
         "roc_auc": roc,
         "average_precision": ap,
+        "pr_auc": pr,
         "ks": ks,
         "ks_threshold": ks_thr,
         "f1_max": f1,
@@ -1300,7 +1339,7 @@ def delong_roc_auc(
     -----
     DeLong assumes independent samples. When rows are clustered (several
     impressions per user or query), use
-    :func:`bootstrap_roc_pr_auc` with ``groups=`` instead. Sample weights are
+    :func:`bootstrap_roc_auc_ap` with ``groups=`` instead. Sample weights are
     not supported here.
     """
     yt, ys = _labels(y_true, pos_label), _scores(y_score)

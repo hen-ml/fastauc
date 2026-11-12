@@ -29,24 +29,24 @@ def test_batch_axis():
     S = rng.random((500, 7))  # scikit-learn layout: (n_samples, n_models)
     Y = rng.integers(0, 2, (500, 7))
     for a, b in ((y, S), (Y, S[:, 0]), (Y, S)):
-        got = fastauc.roc_pr_auc_batch(a, b, axis=0)
-        want = fastauc.roc_pr_auc_batch(a.T if a.ndim == 2 else a, b.T if b.ndim == 2 else b)
+        got = fastauc.roc_auc_ap_batch(a, b, axis=0)
+        want = fastauc.roc_auc_ap_batch(a.T if a.ndim == 2 else a, b.T if b.ndim == 2 else b)
         np.testing.assert_array_equal(got, want)
         assert got[0].shape == (7,)
     with pytest.raises(ValueError, match="axis=0"):
-        fastauc.roc_pr_auc_batch(y, S)
+        fastauc.roc_auc_ap_batch(y, S)
     with pytest.raises(ValueError, match="axis=-1"):
-        fastauc.roc_pr_auc_batch(y, S.T, axis=0)
+        fastauc.roc_auc_ap_batch(y, S.T, axis=0)
     with pytest.raises(ValueError, match="axis must be"):
-        fastauc.roc_pr_auc_batch(y, S, axis=2)
+        fastauc.roc_auc_ap_batch(y, S, axis=2)
 
 
 def test_bootstrap_axis():
     rng = np.random.default_rng(0)
     y = rng.integers(0, 2, 800)
     S = rng.random((800, 3)) + 0.2 * y[:, None]
-    a = fastauc.bootstrap_roc_pr_auc(y, S, axis=0, n_bootstraps=50)
-    b = fastauc.bootstrap_roc_pr_auc(y, S.T, n_bootstraps=50)
+    a = fastauc.bootstrap_roc_auc_ap(y, S, axis=0, n_bootstraps=50)
+    b = fastauc.bootstrap_roc_auc_ap(y, S.T, n_bootstraps=50)
     np.testing.assert_array_equal(a.roc_auc, b.roc_auc)
     assert a.roc_auc.shape == (3, 50)
 
@@ -62,9 +62,9 @@ def test_set_num_threads_does_not_change_results():
 
     def run():
         return (
-            fastauc.roc_pr_auc_batch(y, S),
+            fastauc.roc_auc_ap_batch(y, S),
             fastauc.ranking_metrics(y, s, g),
-            fastauc.bootstrap_roc_pr_auc(y, s, n_bootstraps=64, seed=3).roc_auc,
+            fastauc.bootstrap_roc_auc_ap(y, s, n_bootstraps=64, seed=3).roc_auc,
             fastauc.bootstrap_ranking_metrics(y, s, g, n_bootstraps=64, seed=3).samples["ndcg@5"],
             fastauc.calibration_metrics(y, 1 / (1 + np.exp(-s))),
         )
@@ -119,8 +119,8 @@ def test_group_id_encodings_agree(make_ids):
     for key in ("size", "roc_auc", "ndcg@5", "mrr@1"):
         np.testing.assert_array_equal(a[key], b[key])
 
-    ga = fastauc.roc_pr_auc_grouped(y, s, ids)
-    gb = fastauc.roc_pr_auc_grouped(y, s, names)
+    ga = fastauc.roc_auc_ap_grouped(y, s, ids)
+    gb = fastauc.roc_auc_ap_grouped(y, s, names)
     np.testing.assert_array_equal(ga.groups, np.unique(ids))
     np.testing.assert_array_equal(ga.roc_auc, gb.roc_auc)
     np.testing.assert_array_equal(ga.n_pos, gb.n_pos)
@@ -133,16 +133,16 @@ def test_group_id_encodings_agree(make_ids):
 
 def test_grouped_bootstrap_singleton_groups_equal_row_bootstrap():
     y, s, _ = clustered(seed=3)
-    a = fastauc.bootstrap_roc_pr_auc(y, s, n_bootstraps=100, seed=5)
-    b = fastauc.bootstrap_roc_pr_auc(y, s, n_bootstraps=100, seed=5, groups=np.arange(len(y)))
+    a = fastauc.bootstrap_roc_auc_ap(y, s, n_bootstraps=100, seed=5)
+    b = fastauc.bootstrap_roc_auc_ap(y, s, n_bootstraps=100, seed=5, groups=np.arange(len(y)))
     np.testing.assert_array_equal(a.roc_auc, b.roc_auc)
     np.testing.assert_array_equal(a.average_precision, b.average_precision)
 
 
 def test_grouped_bootstrap_matches_naive_cluster_bootstrap():
     y, s, g = clustered(seed=4)
-    row = fastauc.bootstrap_roc_pr_auc(y, s, n_bootstraps=2000, seed=0)
-    grp = fastauc.bootstrap_roc_pr_auc(y, s, n_bootstraps=2000, seed=0, groups=g)
+    row = fastauc.bootstrap_roc_auc_ap(y, s, n_bootstraps=2000, seed=0)
+    grp = fastauc.bootstrap_roc_auc_ap(y, s, n_bootstraps=2000, seed=0, groups=g)
     assert grp.roc_auc_estimate == row.roc_auc_estimate
 
     rng = np.random.default_rng(1)
@@ -158,9 +158,9 @@ def test_grouped_bootstrap_matches_naive_cluster_bootstrap():
     # The point of the feature: ignoring the clustering understates uncertainty.
     assert grp.std() > 1.3 * row.std()
 
-    again = fastauc.bootstrap_roc_pr_auc(y, s, n_bootstraps=2000, seed=0, groups=g)
+    again = fastauc.bootstrap_roc_auc_ap(y, s, n_bootstraps=2000, seed=0, groups=g)
     np.testing.assert_array_equal(grp.roc_auc, again.roc_auc)
-    as_str = fastauc.bootstrap_roc_pr_auc(
+    as_str = fastauc.bootstrap_roc_auc_ap(
         y, s, n_bootstraps=2000, seed=0, groups=np.array([f"{v:06d}" for v in g])
     )
     np.testing.assert_array_equal(grp.roc_auc, as_str.roc_auc)
@@ -169,15 +169,15 @@ def test_grouped_bootstrap_matches_naive_cluster_bootstrap():
 def test_grouped_bootstrap_errors():
     y, s, g = clustered(seed=5)
     with pytest.raises(ValueError, match="stratified"):
-        fastauc.bootstrap_roc_pr_auc(y, s, groups=g, stratified=True)
+        fastauc.bootstrap_roc_auc_ap(y, s, groups=g, stratified=True)
     with pytest.raises(ValueError, match="length"):
-        fastauc.bootstrap_roc_pr_auc(y, s, groups=g[:-1])
+        fastauc.bootstrap_roc_auc_ap(y, s, groups=g[:-1])
 
 
 def test_weighted_bootstrap():
     y, s, _ = clustered(n_groups=150, seed=6)
     w = np.random.default_rng(0).integers(1, 5, len(y)).astype(float)
-    r = fastauc.bootstrap_roc_pr_auc(y, s, n_bootstraps=1500, sample_weight=w, seed=2)
+    r = fastauc.bootstrap_roc_auc_ap(y, s, n_bootstraps=1500, sample_weight=w, seed=2)
     assert r.roc_auc_estimate == pytest.approx(roc_auc_score(y, s, sample_weight=w))
     assert r.roc_auc_estimate == fastauc.roc_auc(y, s, sample_weight=w)
 
@@ -190,8 +190,8 @@ def test_weighted_bootstrap():
     lo, hi = r.ci()
     assert lo < r.roc_auc_estimate < hi
     # All-ones weights change nothing.
-    a = fastauc.bootstrap_roc_pr_auc(y, s, n_bootstraps=50, sample_weight=np.ones(len(y)))
-    b = fastauc.bootstrap_roc_pr_auc(y, s, n_bootstraps=50)
+    a = fastauc.bootstrap_roc_auc_ap(y, s, n_bootstraps=50, sample_weight=np.ones(len(y)))
+    b = fastauc.bootstrap_roc_auc_ap(y, s, n_bootstraps=50)
     np.testing.assert_allclose(a.roc_auc, b.roc_auc, rtol=1e-12)
 
 

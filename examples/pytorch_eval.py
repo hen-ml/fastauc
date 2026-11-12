@@ -22,7 +22,7 @@ def evaluate(model, loader):
 
     out = fastauc.binary_metrics(y, p)                        # AUC, KS, log loss, ECE, ...
     out.update(fastauc.ranking_metrics(y, p, q, ks=(1, 10)))  # per-query NDCG, MRR, GAUC, ...
-    boot = fastauc.bootstrap_roc_pr_auc(y, p, groups=q, n_bootstraps=500)
+    boot = fastauc.bootstrap_roc_auc_ap(y, p, groups=q, n_bootstraps=500)
     out["roc_auc_ci95"] = boot.ci("roc_auc")                  # resamples whole queries
     return out
 

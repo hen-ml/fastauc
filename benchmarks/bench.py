@@ -42,20 +42,20 @@ def main():
         s = rng.random(n)
         rep = 1 if n >= 10_000_000 else 3
         row(f"single pair, N={n:,}", best(lambda: sk_pair(y, s), rep),
-            best(lambda: fastauc.roc_pr_auc(y, s), rep))
+            best(lambda: fastauc.roc_auc_ap(y, s), rep))
 
     n, m = 10_000, 1_000
     y = rng.integers(0, 2, n, dtype=np.uint8)
     S = rng.random((m, n))
     row(f"{m:,} models x 1 target, N={n:,}",
         best(lambda: [sk_pair(y, r) for r in S], 1),
-        best(lambda: fastauc.roc_pr_auc_batch(y, S)))
+        best(lambda: fastauc.roc_auc_ap_batch(y, S)))
 
     Y = rng.integers(0, 2, (m, n), dtype=np.uint8)
     s = rng.random(n)
     row(f"1 model x {m:,} targets, N={n:,}",
         best(lambda: [sk_pair(r, s) for r in Y], 1),
-        best(lambda: fastauc.roc_pr_auc_batch(Y, s)))
+        best(lambda: fastauc.roc_auc_ap_batch(Y, s)))
 
     def sk_boot():
         r = np.random.default_rng(0)
@@ -64,7 +64,7 @@ def main():
             sk_pair(y[i], s[i])
 
     row(f"{m:,} bootstrap replicates, N={n:,}", best(sk_boot, 1),
-        best(lambda: fastauc.bootstrap_roc_pr_auc(y, s, n_bootstraps=m)))
+        best(lambda: fastauc.bootstrap_roc_auc_ap(y, s, n_bootstraps=m)))
 
     n, g = 1_000_000, 20_000
     y = rng.integers(0, 2, n, dtype=np.uint8)
@@ -79,7 +79,7 @@ def main():
                 sk_pair(yy, ss)
 
     row(f"grouped, N={n:,}, {g:,} groups", best(sk_grouped, 1),
-        best(lambda: fastauc.roc_pr_auc_grouped(y, s, groups)))
+        best(lambda: fastauc.roc_auc_ap_grouped(y, s, groups)))
 
     def sk_ndcg():
         order = np.argsort(groups, kind="stable")
