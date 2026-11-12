@@ -184,6 +184,46 @@ class _FakeTensor:
         raise TypeError("can't convert a device tensor with grad to numpy")
 
 
+class _FakeBf16Tensor(_FakeTensor):
+    """A bfloat16 tensor: .numpy() fails until it is widened with .float()."""
+
+    def __init__(self, a):
+        super().__init__(a)
+        self.widened = False
+
+    def float(self):
+        self.calls.append("float")
+        self.widened = True
+        return self
+
+    def numpy(self):
+        if not self.widened:
+            raise TypeError("Got unsupported ScalarType BFloat16")
+        return self._a
+
+
+def test_bfloat16_tensors_are_widened():
+    s = _FakeBf16Tensor([0.125, 0.875, 0.75, 0.25])
+    assert fastauc.roc_auc([0, 1, 1, 0], s) == 1.0
+    assert s.calls == ["detach", "cpu", "float"]
+
+
+def test_xgboost_per_query_weights(ranking_data):
+    xgb = pytest.importorskip("xgboost")
+    sizes, x, rel = ranking_data
+    qid = np.repeat(np.arange(len(sizes)), sizes)
+    w = np.linspace(0.5, 2.0, len(sizes))
+    d = xgb.DMatrix(x, rel, qid=qid)
+    d.set_weight(w)  # one weight per query, as XGBoost requires for ranking
+    preds = np.round(x[:, 0], 1)
+    got = fa_xgb.ranking("ndcg@10")(preds, d)
+    # DMatrix stores weights as float32.
+    ref = fastauc.ranking_metrics(rel, preds, group_sizes=sizes, ks=(10,),
+                                  sample_weight=np.repeat(w.astype(np.float32), sizes))
+    assert got[0][0] == "ndcg@10" and got[0][1] == pytest.approx(ref["ndcg@10"], rel=1e-12)
+    assert ref["ndcg@10"] != fastauc.ranking_metrics(rel, preds, group_sizes=sizes, ks=(10,))["ndcg@10"]
+
+
 def test_tensor_like_inputs_are_detached():
     y = _FakeTensor([0, 1, 1, 0])
     s = _FakeTensor([0.1, 0.9, 0.8, 0.3])

@@ -98,7 +98,12 @@ def _np(x: Any, dtype: Any = None) -> np.ndarray:
     without grad) are detached and copied to host memory; Polars, PyArrow,
     pandas, JAX and NumPy inputs go through ``np.asarray``."""
     if hasattr(x, "detach") and hasattr(x, "cpu") and hasattr(x, "numpy"):
-        x = x.detach().cpu().numpy()
+        x = x.detach().cpu()
+        try:
+            x = x.numpy()
+        except TypeError:
+            # NumPy has no bfloat16: widen to float32, which represents it exactly.
+            x = x.float().numpy()
     return np.asarray(x, dtype=dtype)
 
 

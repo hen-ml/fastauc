@@ -12,7 +12,7 @@
               evals=[(dvalid, "valid")], custom_metric=fa_xgb.binary("roc_auc", "log_loss"))
 
 Ranking metrics take query groups from the evaluation ``DMatrix`` (``qid=``
-or ``set_group``). Tied predictions are handled exactly, unlike XGBoost's
+or ``set_group``) and its per-query weights, if set. Tied predictions are handled exactly, unlike XGBoost's
 built-in NDCG and MAP, which depend on row order within a query. For early
 stopping, XGBoost uses the last metric listed; pass ``maximize=True`` to
 ``xgb.train`` unless that metric is a loss. XGBoost itself is not imported.
@@ -44,10 +44,13 @@ def ranking(*metrics: str, gain: str = "exponential", no_relevant: str = "skip")
     names, ks = _i.parse_ranking(metrics)
 
     def custom_metric(preds, dmatrix):
-        return _i.ranking_values(
-            names, ks, dmatrix.get_label(), preds, _group_sizes(dmatrix),
-            _i.weights_or_none(dmatrix.get_weight()), gain, no_relevant,
-        )
+        sizes = _group_sizes(dmatrix)
+        weights = _i.weights_or_none(dmatrix.get_weight())
+        if weights is not None and len(sizes) and len(weights) == len(sizes):
+            # XGBoost ranking weights are per query; give each row its query's weight.
+            weights = np.repeat(weights, sizes)
+        return _i.ranking_values(names, ks, dmatrix.get_label(), preds, sizes, weights,
+                                 gain, no_relevant)
 
     return _i.describe(custom_metric, "ranking", names)
 
