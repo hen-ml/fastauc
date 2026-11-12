@@ -37,7 +37,7 @@ Changelog = "https://github.com/hen-ml/fastauc/blob/main/CHANGELOG.md"
 python-source = "python"
 module-name = "fastauc._core"
 features = ["pyo3/extension-module"]
-exclude = ["dist/**", "target/**", ".github/**", "docs/**", "mkdocs.yml", "redirect/**", "conda-recipe/**"]
+exclude = ["dist/**", "target/**", ".github/**", "docs/**", "mkdocs.yml", "conda-recipe/**"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

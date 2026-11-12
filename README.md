@@ -507,9 +507,9 @@ environment.
 
 ## Releasing
 
-1. PyPI trusted publishers (once): project `pyfastauc`, and project `fastauc` for the alias in `redirect/` (a "pending publisher" until its first upload). Both: owner `hen-ml`, repository `fastauc`, workflow `CI.yml`, environment `pypi`.
-2. Bump the version in `Cargo.toml`, `pyproject.toml`, `python/fastauc/__init__.py` and `redirect/pyproject.toml` (its version and its `pyfastauc==` pin; CI checks they agree).
-3. `git tag vX.Y.Z && git push --tags`. CI builds abi3 wheels for Linux (glibc and musl, x86-64 and aarch64), macOS (Intel and Apple silicon) and Windows, free-threaded 3.14t wheels, runs the tests, publishes `pyfastauc`, then publishes the `fastauc` alias.
+1. PyPI trusted publisher (once): project `pyfastauc`, owner `hen-ml`, repository `fastauc`, workflow `CI.yml`, environment `pypi`. (PyPI does not allow the project name `fastauc`, so there is no alias package.)
+2. Bump the version in `Cargo.toml`, `pyproject.toml` and `python/fastauc/__init__.py`.
+3. `git tag vX.Y.Z && git push --tags`. CI builds abi3 wheels for Linux (glibc and musl, x86-64 and aarch64), macOS (Intel and Apple silicon) and Windows, free-threaded 3.14t wheels, runs the tests, and publishes `pyfastauc`.
 4. conda-forge: fill in the sdist hash in `conda-recipe/meta.yaml` and submit it to conda-forge/staged-recipes (first release only; afterwards the feedstock's bot opens version bumps).
 
 Documentation is built from `docs/` by the Docs workflow and published to
