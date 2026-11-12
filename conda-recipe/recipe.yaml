@@ -1,0 +1,73 @@
+# conda-forge recipe for pyfastauc (v1 recipe format, built by rattler-build).
+# First submission: copy this file to recipes/pyfastauc/recipe.yaml in a fork
+# of https://github.com/conda-forge/staged-recipes and open a pull request.
+# Later versions are bumped by the feedstock's bot.
+context:
+  name: pyfastauc
+  version: "0.2.0"
+
+package:
+  name: ${{ name }}
+  version: ${{ version }}
+
+source:
+  url: https://pypi.org/packages/source/${{ name[0] }}/${{ name }}/pyfastauc-${{ version }}.tar.gz
+  sha256: 0e66e9b64c9a44455bd6e9f9d1881fb95c20f8f58839c2975e65a44a2733ef57
+
+build:
+  number: 0
+  skip:
+    - match(python, "<3.9")
+  script:
+    - cargo-bundle-licenses --format yaml --output THIRDPARTY.yml
+    - ${{ PYTHON }} -m pip install . -vv --no-deps --no-build-isolation
+
+requirements:
+  build:
+    - ${{ stdlib("c") }}
+    - ${{ compiler("c") }}
+    - ${{ compiler("rust") }}
+    - cargo-bundle-licenses
+    - if: build_platform != target_platform
+      then:
+        - python
+        - cross-python_${{ target_platform }}
+        - maturin >=1.7,<2
+  host:
+    - python
+    - pip
+    - maturin >=1.7,<2
+  run:
+    - python
+    - numpy >=1.22
+
+tests:
+  - python:
+      imports:
+        - fastauc
+        - fastauc.sklearn
+      pip_check: true
+  - script:
+      - python -c "import fastauc; assert fastauc.roc_auc([0, 1, 1, 0], [0.1, 0.9, 0.8, 0.3]) == 1.0"
+      - python -c "import fastauc; acc = fastauc.BinaryAccumulator().update([0, 1, 1], [0.2, 0.7, 0.2]); assert acc.roc_auc() == 0.75"
+    requirements:
+      run:
+        - python
+
+about:
+  homepage: https://github.com/hen-ml/fastauc
+  repository: https://github.com/hen-ml/fastauc
+  documentation: https://hen-ml.github.io/fastauc/
+  summary: Exact, fast classification, calibration and ranking metrics, written in Rust
+  description: |
+    ROC-AUC, average precision, GAUC, NDCG, MRR, MAP, calibration metrics,
+    bootstrap and DeLong intervals, paired significance tests, exact streaming
+    and a scikit-learn drop-in. Tied scores never leak row order.
+  license: MIT
+  license_file:
+    - LICENSE
+    - THIRDPARTY.yml
+
+extra:
+  recipe-maintainers:
+    - hen-ml
