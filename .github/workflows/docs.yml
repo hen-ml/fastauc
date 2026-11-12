@@ -1,0 +1,55 @@
+# Builds the documentation on every pull request that touches it, and
+# publishes it to GitHub Pages from main. One-time setup: repository
+# Settings > Pages > Build and deployment > Source: "GitHub Actions".
+name: Docs
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - docs/**
+      - mkdocs.yml
+      - python/**
+      - CHANGELOG.md
+      - .github/workflows/docs.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install MkDocs
+        # MkDocs 2.0 drops plugins; stay on 1.x.
+        run: pip install "mkdocs>=1.6,<2" "mkdocs-material>=9.5,<10" "mkdocstrings[python]>=0.26,<2"
+      - name: Build (warnings are errors)
+        run: mkdocs build --strict
+      - uses: actions/upload-pages-artifact@v4
+        if: ${{ github.event_name != 'pull_request' }}
+        with:
+          path: site
+
+  deploy:
+    if: ${{ github.event_name != 'pull_request' }}
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

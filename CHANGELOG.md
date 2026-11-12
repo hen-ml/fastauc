@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.2.0
+
+Everything stays exact: no binning, no sketching, no random tie-breaking, no
+hashing that can merge two ids.
+
+- `fastauc.sklearn`: drop-in replacements for `roc_auc_score` (binary, `max_fpr`, multiclass `ovr`/`ovo`, multilabel), `average_precision_score`, `ndcg_score`, `dcg_score`, `roc_curve`, `precision_recall_curve`, `auc`, `log_loss` and `brier_score_loss`, with scikit-learn's values, warnings and error messages.
+- `BinaryAccumulator`: exact streaming binary metrics with `update`, `merge` (or `+`), `compute`, `reset`, pickling and `state()`/`from_state()` for distributed gathers. Bit-identical to the one-shot result for unweighted data.
+- `paired_test`: paired randomization (sign-flip) test, exact by enumeration for small samples, and paired t-test without scipy. `holm` for Holm-Bonferroni adjusted p-values.
+- `roc_auc_multiclass` (one-vs-rest and Hand-Till one-vs-one) and `partial_roc_auc` (McClish-standardized, as scikit-learn's `max_fpr`).
+- `ranking_metrics(judgments=...)`: complete relevance judgments (qrels) for incomplete lists, so recall, MAP and ideal DCG count unretrieved relevant items; matches trec_eval. `map_denominator="total"` divides AP@k by the number of relevant items (trec_eval, ranx); the default `"min"` keeps `min(R, k)`.
+- String query ids are grouped by an exact hash table in Rust (ids compared byte for byte), 4 to 6 times faster than `np.unique` with identical output.
+- Faster ranking kernel: reused per-thread buffers, early exit past the deepest cutoff, partial selection for the ideal DCG. About 2x faster on short lists; on one thread, computing every ranking metric now takes less time than a warm Numba kernel computing NDCG@10 alone.
+- Free-threaded CPython 3.14t wheels; concurrent calls from Python threads are tested to match serial results.
+- Documentation site.
+
 ## 0.1.0
 
 Initial release, published on PyPI as `pyfastauc` (imported as `fastauc`).

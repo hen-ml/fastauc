@@ -847,6 +847,35 @@ impl RankTables {
     }
 }
 
+/// Reusable per-thread buffers for `rank_group`, so short lists cost no
+/// allocations.
+#[derive(Default)]
+struct Scratch {
+    keyed: Vec<(u64, u32)>,
+    tpk: Vec<f64>,
+    dcg: Vec<f64>,
+    ap: Vec<f64>,
+    mrr: Vec<f64>,
+    miss: Vec<f64>,
+    ideal: Vec<f64>,
+}
+
+/// Per-call options shared by every group.
+struct RankOpts<'a> {
+    ks: &'a [usize],
+    /// All gains are 0 or 1: the ideal DCG is a prefix of discounts, no sort.
+    binary: bool,
+    /// MAP@k divides by R (trec_eval) instead of min(R, k).
+    map_by_total: bool,
+}
+
+/// Optional complete judgments for one group: the number of judged relevant
+/// items and the ideal DCG at each cutoff (computed from all judged gains).
+struct Judged<'a> {
+    n_relevant: f64,
+    idcg: &'a [f64],
+}
+
 /// All ranking metrics for one group, written to `out` as
 /// `[roc_auc, (ndcg, mrr, map, recall, precision, hit_rate) per cutoff]`.
 ///
@@ -854,14 +883,18 @@ impl RankTables {
 /// under a uniformly random ordering of the tied items, in closed form.
 /// With no ties this is the ordinary definition.
 ///
-/// A cutoff of `usize::MAX` means "the whole list".
+/// A cutoff of `usize::MAX` means "the whole list". Without `judged`, the
+/// relevant items in the list are taken to be all of them.
+#[allow(clippy::too_many_arguments)]
 fn rank_group(
     m: &[u32],
     yt: &[u8],
     gains: &[f64],
     ys: &[f64],
-    ks: &[usize],
+    opts: &RankOpts,
+    judged: Option<Judged>,
     tab: &RankTables,
+    sc: &mut Scratch,
     out: &mut [f64],
 ) {
     out.fill(f64::NAN);
@@ -869,26 +902,34 @@ fn rank_group(
     if len == 0 {
         return;
     }
+    let ks = opts.ks;
     let nk = ks.len();
-    let sorted = sort_desc(m.iter().map(|&i| ys[i as usize]));
+    // Deepest position any cutoff looks at.
+    let kmax = ks.iter().copied().max().unwrap_or(0).min(len);
 
-    // Per-cutoff accumulators.
-    let mut tpk = vec![0.0f64; nk];
-    let mut dcg = vec![0.0f64; nk];
-    let mut ap = vec![0.0f64; nk];
-    let mut mrr = vec![0.0f64; nk];
-    let mut miss = vec![1.0f64; nk]; // P(no relevant item in the top k)
+    sc.keyed.clear();
+    sc.keyed.extend(m.iter().map(|&i| (desc_key(ys[i as usize]), i)));
+    sc.keyed.sort_unstable();
+    let keyed = &sc.keyed;
+
+    for v in [&mut sc.tpk, &mut sc.dcg, &mut sc.ap, &mut sc.mrr] {
+        v.clear();
+        v.resize(nk, 0.0);
+    }
+    sc.miss.clear();
+    sc.miss.resize(nk, 1.0); // P(no relevant item in the top k)
 
     let (mut tp, mut fp, mut roc) = (0.0f64, 0.0f64, 0.0f64);
     let (mut s, mut p, mut gsum) = (0usize, 0usize, 0.0f64);
 
     for i in 0..len {
-        let idx = m[sorted.order[i] as usize] as usize;
+        let (key, idx) = keyed[i];
+        let idx = idx as usize;
         if yt[idx] != 0 {
             p += 1;
         }
         gsum += gains[idx];
-        if !sorted.tie_end[i] {
+        if i + 1 < len && keyed[i + 1].0 == key {
             continue;
         }
         // Tied block occupies 0-based positions s..e, with p relevant items.
@@ -898,52 +939,54 @@ fn rank_group(
         let nf = tf - pf;
         roc += nf * (tp + tp + pf) * 0.5;
 
-        for (j, &k) in ks.iter().enumerate() {
-            if s >= k {
-                continue;
-            }
-            let a = e.min(k) - s; // block positions inside the cutoff
-            let af = a as f64;
-            dcg[j] += gsum * (tab.disc[s + a] - tab.disc[s]) / tf;
-            if p == 0 {
-                continue;
-            }
-            tpk[j] += pf * af / tf;
+        if s < kmax {
+            for (j, &k) in ks.iter().enumerate() {
+                if s >= k {
+                    continue;
+                }
+                let a = e.min(k) - s; // block positions inside the cutoff
+                let af = a as f64;
+                sc.dcg[j] += gsum * (tab.disc[s + a] - tab.disc[s]) / tf;
+                if p == 0 {
+                    continue;
+                }
+                sc.tpk[j] += pf * af / tf;
 
-            // AP: position s+q is relevant w.p. p/t; given that, the expected
-            // number of relevant items at or above it is
-            // tp + 1 + (q-1)(p-1)/(t-1).
-            let h = tab.harm[s + a] - tab.harm[s];
-            let mut term = (tp + 1.0) * h;
-            if t > 1 {
-                term += (pf - 1.0) / (tf - 1.0) * (af - (s as f64 + 1.0) * h);
-            }
-            ap[j] += pf / tf * term;
+                // AP: position s+q is relevant w.p. p/t; given that, the expected
+                // number of relevant items at or above it is
+                // tp + 1 + (q-1)(p-1)/(t-1).
+                let h = tab.harm[s + a] - tab.harm[s];
+                let mut term = (tp + 1.0) * h;
+                if t > 1 {
+                    term += (pf - 1.0) / (tf - 1.0) * (af - (s as f64 + 1.0) * h);
+                }
+                sc.ap[j] += pf / tf * term;
 
-            // MRR: only the first block holding a relevant item matters.
-            // P(first relevant at block offset q) = C(t-q, p-1) / C(t, p).
-            if tp == 0.0 {
-                let lim = a.min(t - p + 1);
-                let mut pq = pf / tf;
-                let mut acc = 0.0;
-                for q in 1..=lim {
-                    acc += pq / (s + q) as f64;
-                    if q < lim {
-                        pq *= (t - q - p + 1) as f64 / (t - q) as f64;
+                // MRR: only the first block holding a relevant item matters.
+                // P(first relevant at block offset q) = C(t-q, p-1) / C(t, p).
+                if tp == 0.0 {
+                    let lim = a.min(t - p + 1);
+                    let mut pq = pf / tf;
+                    let mut acc = 0.0;
+                    for q in 1..=lim {
+                        acc += pq / (s + q) as f64;
+                        if q < lim {
+                            pq *= (t - q - p + 1) as f64 / (t - q) as f64;
+                        }
                     }
+                    sc.mrr[j] = acc;
                 }
-                mrr[j] = acc;
-            }
 
-            // Hit rate: P(none of the first `a` block slots is relevant).
-            if a > t - p {
-                miss[j] = 0.0;
-            } else if miss[j] > 0.0 {
-                let mut pr = 1.0;
-                for q in 0..a {
-                    pr *= (t - p - q) as f64 / (t - q) as f64;
+                // Hit rate: P(none of the first `a` block slots is relevant).
+                if a > t - p {
+                    sc.miss[j] = 0.0;
+                } else if sc.miss[j] > 0.0 {
+                    let mut pr = 1.0;
+                    for q in 0..a {
+                        pr *= (t - p - q) as f64 / (t - q) as f64;
+                    }
+                    sc.miss[j] *= pr;
                 }
-                miss[j] *= pr;
             }
         }
 
@@ -957,29 +1000,42 @@ fn rank_group(
     if tp > 0.0 && fp > 0.0 {
         out[0] = roc / (tp * fp);
     }
-    if tp == 0.0 {
+    let n_rel = judged.as_ref().map_or(tp, |j| j.n_relevant);
+    if n_rel == 0.0 {
         return; // no relevant items: ranking metrics undefined
     }
 
-    // Ideal DCG prefix sums.
-    let mut ideal: Vec<f64> = m.iter().map(|&i| gains[i as usize]).collect();
-    ideal.sort_unstable_by(|a, b| b.total_cmp(a));
-    let mut acc = 0.0;
-    for (r, g) in ideal.iter_mut().enumerate() {
-        acc += *g * (tab.disc[r + 1] - tab.disc[r]);
-        *g = acc;
+    // Ideal DCG at each cutoff, unless the judgments supply it.
+    if judged.is_none() && !opts.binary {
+        sc.ideal.clear();
+        sc.ideal.extend(m.iter().map(|&i| gains[i as usize]));
+        if kmax < len {
+            sc.ideal.select_nth_unstable_by(kmax, |a, b| b.total_cmp(a));
+            sc.ideal.truncate(kmax);
+        }
+        sc.ideal.sort_unstable_by(|a, b| b.total_cmp(a));
+        let mut acc = 0.0;
+        for (r, g) in sc.ideal.iter_mut().enumerate() {
+            acc += *g * (tab.disc[r + 1] - tab.disc[r]);
+            *g = acc;
+        }
     }
 
     for (j, &k) in ks.iter().enumerate() {
         let keff = k.min(len);
         let o = &mut out[1 + j * PER_K..1 + (j + 1) * PER_K];
-        let idcg = ideal[keff - 1];
-        o[0] = if idcg > 0.0 { dcg[j] / idcg } else { f64::NAN };
-        o[1] = mrr[j];
-        o[2] = ap[j] / tp.min(keff as f64);
-        o[3] = tpk[j] / tp;
-        o[4] = tpk[j] / if k == usize::MAX { len as f64 } else { k as f64 };
-        o[5] = 1.0 - miss[j];
+        let idcg = match &judged {
+            Some(jd) => jd.idcg[j],
+            None if opts.binary => tab.disc[(tp as usize).min(keff)],
+            None => sc.ideal[keff - 1],
+        };
+        o[0] = if idcg > 0.0 { sc.dcg[j] / idcg } else { f64::NAN };
+        o[1] = sc.mrr[j];
+        let map_den = if opts.map_by_total { n_rel } else { n_rel.min(k as f64) };
+        o[2] = sc.ap[j] / map_den;
+        o[3] = sc.tpk[j] / n_rel;
+        o[4] = sc.tpk[j] / if k == usize::MAX { len as f64 } else { k as f64 };
+        o[5] = 1.0 - sc.miss[j];
     }
 }
 
@@ -991,8 +1047,12 @@ fn rank_group(
 /// * `extra = [auc_sum, auc_weight, n_nonempty, n_ranked, n_auc, w_nonempty]`
 ///   where the AUC aggregate weights each group by `group_weight * size`;
 /// * `per_group`: flat `(n_groups, 1 + 6 * len(ks))` matrix, empty unless requested.
+///
+/// `judged_n_relevant` (n_groups) and `judged_idcg` (n_groups x len(ks)), when
+/// given, describe the complete judgments for each group.
 #[pyfunction]
-#[pyo3(signature = (y_true, gains, y_score, codes, n_groups, ks, per_group, group_weight=None))]
+#[pyo3(signature = (y_true, gains, y_score, codes, n_groups, ks, per_group, group_weight=None,
+                    binary=false, map_by_total=false, judged_n_relevant=None, judged_idcg=None))]
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn ranking<'py>(
     py: Python<'py>,
@@ -1004,6 +1064,10 @@ fn ranking<'py>(
     ks: Vec<usize>,
     per_group: bool,
     group_weight: Option<PyReadonlyArray1<'py, f64>>,
+    binary: bool,
+    map_by_total: bool,
+    judged_n_relevant: Option<PyReadonlyArray1<'py, f64>>,
+    judged_idcg: Option<PyReadonlyArray1<'py, f64>>,
 ) -> PyResult<(
     Bound<'py, PyArray1<f64>>,
     Bound<'py, PyArray1<f64>>,
@@ -1015,6 +1079,8 @@ fn ranking<'py>(
     let ys = y_score.as_slice()?;
     let codes = codes.as_slice()?;
     let gw = weights_slice(&group_weight)?;
+    let jn = weights_slice(&judged_n_relevant)?;
+    let ji = weights_slice(&judged_idcg)?;
     let n = ys.len();
     check_len(n)?;
     check_same("y_true / y_score", yt.len(), n)?;
@@ -1031,11 +1097,22 @@ fn ranking<'py>(
     if ks.contains(&0) {
         return err("cutoffs must be >= 1");
     }
-    let width = 1 + PER_K * ks.len();
+    if jn.is_some() != ji.is_some() {
+        return err("judged_n_relevant and judged_idcg go together");
+    }
+    if let (Some(jn), Some(ji)) = (jn, ji) {
+        check_same("judged_n_relevant / groups", jn.len(), n_groups)?;
+        check_same("judged_idcg / groups x cutoffs", ji.len(), n_groups * ks.len())?;
+        if jn.iter().chain(ji.iter()).any(|v| !v.is_finite() || *v < 0.0) {
+            return err("judgments must be finite and non-negative");
+        }
+    }
+    let nk = ks.len();
+    let width = 1 + PER_K * nk;
 
     const CHUNK: usize = 512;
     const EXTRA: usize = 6;
-    let (sums, wts, extra, rows) = detached(py, || {
+    let outcome = detached(py, || {
         let mut start = vec![0usize; n_groups + 1];
         for &c in codes {
             start[c as usize + 1] += 1;
@@ -1045,14 +1122,34 @@ fn ranking<'py>(
             max_len = max_len.max(start[g + 1]);
             start[g + 1] += start[g];
         }
-        let mut cursor = start.clone();
-        let mut members = vec![0u32; n];
-        for (i, &c) in codes.iter().enumerate() {
-            let slot = &mut cursor[c as usize];
-            members[*slot] = i as u32;
-            *slot += 1;
+        // Rows of one group are usually contiguous already; then the
+        // members list is just 0..n and needs no scatter.
+        let members: Vec<u32> = if codes.windows(2).all(|w| w[0] <= w[1]) {
+            (0..n as u32).collect()
+        } else {
+            let mut cursor = start.clone();
+            let mut members = vec![0u32; n];
+            for (i, &c) in codes.iter().enumerate() {
+                let slot = &mut cursor[c as usize];
+                members[*slot] = i as u32;
+                *slot += 1;
+            }
+            members
+        };
+        // In-list relevant items may not exceed the judged total.
+        if let Some(jn) = jn {
+            for g in 0..n_groups {
+                let in_list = members[start[g]..start[g + 1]]
+                    .iter()
+                    .filter(|&&i| yt[i as usize] != 0)
+                    .count();
+                if in_list as f64 > jn[g] {
+                    return Err(g);
+                }
+            }
         }
         let tab = RankTables::new(max_len);
+        let opts = RankOpts { ks: &ks, binary, map_by_total };
 
         // Fixed chunks, reduced in order: bit-identical for any thread count.
         struct Part {
@@ -1063,7 +1160,7 @@ fn ranking<'py>(
         }
         let parts: Vec<Part> = (0..n_groups.div_ceil(CHUNK))
             .into_par_iter()
-            .map(|c| {
+            .map_init(Scratch::default, |sc, c| {
                 let lo = c * CHUNK;
                 let hi = (lo + CHUNK).min(n_groups);
                 let mut part = Part {
@@ -1076,7 +1173,14 @@ fn ranking<'py>(
                 for g in lo..hi {
                     let m = &members[start[g]..start[g + 1]];
                     let qw = gw.map_or(1.0, |w| w[g]);
-                    rank_group(m, yt, gains, ys, &ks, &tab, &mut buf);
+                    let judged = match (jn, ji) {
+                        (Some(jn), Some(ji)) => Some(Judged {
+                            n_relevant: jn[g],
+                            idcg: &ji[g * nk..(g + 1) * nk],
+                        }),
+                        _ => None,
+                    };
+                    rank_group(m, yt, gains, ys, &opts, judged, &tab, sc, &mut buf);
                     if !m.is_empty() {
                         part.extra[2] += 1.0;
                         part.extra[5] += qw;
@@ -1087,7 +1191,7 @@ fn ranking<'py>(
                         part.extra[1] += aw;
                         part.extra[4] += 1.0;
                     }
-                    if width > 1 && !buf[1].is_nan() {
+                    if width > 1 && !buf[2].is_nan() {
                         part.extra[3] += 1.0;
                     }
                     for (c, &v) in buf.iter().enumerate() {
@@ -1118,9 +1222,17 @@ fn ranking<'py>(
             }
             rows.extend(part.rows);
         }
-        (sums, wts, extra, rows)
+        Ok((sums, wts, extra, rows))
     });
 
+    let (sums, wts, extra, rows) = match outcome {
+        Ok(v) => v,
+        Err(g) => {
+            return err(format!(
+                "group {g} has more relevant items in the list than in the judgments"
+            ))
+        }
+    };
     Ok((
         sums.into_pyarray(py),
         wts.into_pyarray(py),
@@ -1215,8 +1327,243 @@ fn delong_components<'py>(
     Ok(to_py(py, (v10, v01)))
 }
 
+// ---------------------------------------------------------------------------
+// Exact hash grouping
+// ---------------------------------------------------------------------------
+
+/// Dense codes for fixed-width ids (one row of bytes per sample), by hashing.
+///
+/// Exact: the hash only picks a bucket; ids are compared byte for byte, so
+/// two different ids are never merged, however their hashes collide.
+/// Returns (codes, first) where `codes[i]` numbers ids in order of first
+/// appearance and `first[c]` is the index of the first sample with code `c`.
+#[pyfunction]
+#[allow(clippy::type_complexity)]
+fn hash_codes<'py>(
+    py: Python<'py>,
+    ids: PyReadonlyArray2<'py, u8>,
+) -> PyResult<(Bound<'py, PyArray1<i64>>, Bound<'py, PyArray1<i64>>)> {
+    let a: ArrayView2<u8> = ids.as_array();
+    let n = a.nrows();
+    let width = a.ncols();
+    let flat = match a.as_slice() {
+        Some(s) => s,
+        None => return err("ids must be C-contiguous"),
+    };
+    let (codes, first) = detached(py, || {
+        let mut map: rustc_hash::FxHashMap<&[u8], i64> = rustc_hash::FxHashMap::default();
+        map.reserve(n.min(1 << 20));
+        let mut codes = Vec::with_capacity(n);
+        let mut first = Vec::new();
+        for i in 0..n {
+            let key = &flat[i * width..(i + 1) * width];
+            let next = first.len() as i64;
+            let code = *map.entry(key).or_insert_with(|| {
+                first.push(i as i64);
+                next
+            });
+            codes.push(code);
+        }
+        (codes, first)
+    });
+    Ok((codes.into_pyarray(py), first.into_pyarray(py)))
+}
+
+// ---------------------------------------------------------------------------
+// Score tables (exact streaming)
+// ---------------------------------------------------------------------------
+
+type Table<'py> = (
+    Bound<'py, PyArray1<f64>>,
+    Bound<'py, PyArray1<f64>>,
+    Bound<'py, PyArray1<f64>>,
+);
+
+/// Collapse a batch to its distinct scores, in descending order, with the
+/// total positive and negative weight at each score.
+///
+/// Every threshold metric depends on the data only through this table
+/// (samples with equal scores are interchangeable), so metrics computed from
+/// it are exactly the metrics of the rows it summarises.
+#[pyfunction]
+#[pyo3(signature = (y_true, y_score, sample_weight=None))]
+fn score_table<'py>(
+    py: Python<'py>,
+    y_true: PyReadonlyArray1<'py, u8>,
+    y_score: PyReadonlyArray1<'py, f64>,
+    sample_weight: Option<PyReadonlyArray1<'py, f64>>,
+) -> PyResult<Table<'py>> {
+    let yt = y_true.as_slice()?;
+    let ys = y_score.as_slice()?;
+    let w = weights_slice(&sample_weight)?;
+    check_same("y_true / y_score", yt.len(), ys.len())?;
+    check_len(ys.len())?;
+    check_scores(ys)?;
+    check_weights(w, ys.len())?;
+    let (s, p, n) = detached(py, || {
+        let sorted = sort_desc(ys.iter().copied());
+        let (mut s, mut p, mut n) = (Vec::new(), Vec::new(), Vec::new());
+        let (mut tp, mut fp) = (0.0f64, 0.0f64);
+        for (&idx, &end) in sorted.order.iter().zip(sorted.tie_end.iter()) {
+            let i = idx as usize;
+            let wi = w.map_or(1.0, |w| w[i]);
+            if yt[i] != 0 {
+                tp += wi;
+            } else {
+                fp += wi;
+            }
+            if end {
+                s.push(ys[i] + 0.0); // one representative; -0.0 becomes +0.0
+                p.push(tp);
+                n.push(fp);
+                tp = 0.0;
+                fp = 0.0;
+            }
+        }
+        (s, p, n)
+    });
+    Ok((s.into_pyarray(py), p.into_pyarray(py), n.into_pyarray(py)))
+}
+
+/// Merge two score tables (each descending, distinct scores) in linear time.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn merge_score_tables<'py>(
+    py: Python<'py>,
+    a_score: PyReadonlyArray1<'py, f64>,
+    a_pos: PyReadonlyArray1<'py, f64>,
+    a_neg: PyReadonlyArray1<'py, f64>,
+    b_score: PyReadonlyArray1<'py, f64>,
+    b_pos: PyReadonlyArray1<'py, f64>,
+    b_neg: PyReadonlyArray1<'py, f64>,
+) -> PyResult<Table<'py>> {
+    let (sa, pa, na) = (a_score.as_slice()?, a_pos.as_slice()?, a_neg.as_slice()?);
+    let (sb, pb, nb) = (b_score.as_slice()?, b_pos.as_slice()?, b_neg.as_slice()?);
+    check_same("table a", sa.len(), pa.len())?;
+    check_same("table a", sa.len(), na.len())?;
+    check_same("table b", sb.len(), pb.len())?;
+    check_same("table b", sb.len(), nb.len())?;
+    check_scores(sa)?;
+    check_scores(sb)?;
+    let strictly_desc = |s: &[f64]| s.windows(2).all(|w| desc_key(w[0]) < desc_key(w[1]));
+    if !strictly_desc(sa) || !strictly_desc(sb) {
+        return err("score tables must hold distinct scores in descending order");
+    }
+    let (s, p, n) = detached(py, || {
+        let cap = sa.len() + sb.len();
+        let (mut s, mut p, mut n) =
+            (Vec::with_capacity(cap), Vec::with_capacity(cap), Vec::with_capacity(cap));
+        let (mut i, mut j) = (0, 0);
+        while i < sa.len() || j < sb.len() {
+            let ka = sa.get(i).map_or(u64::MAX, |&x| desc_key(x));
+            let kb = sb.get(j).map_or(u64::MAX, |&x| desc_key(x));
+            if ka < kb || j == sb.len() {
+                s.push(sa[i] + 0.0);
+                p.push(pa[i]);
+                n.push(na[i]);
+                i += 1;
+            } else if kb < ka || i == sa.len() {
+                s.push(sb[j] + 0.0);
+                p.push(pb[j]);
+                n.push(nb[j]);
+                j += 1;
+            } else {
+                s.push(sa[i] + 0.0);
+                p.push(pa[i] + pb[j]);
+                n.push(na[i] + nb[j]);
+                i += 1;
+                j += 1;
+            }
+        }
+        (s, p, n)
+    });
+    Ok((s.into_pyarray(py), p.into_pyarray(py), n.into_pyarray(py)))
+}
+
+// ---------------------------------------------------------------------------
+// Paired randomization test
+// ---------------------------------------------------------------------------
+
+/// Sign-flip randomization test on paired differences `d`.
+///
+/// Under the null hypothesis each difference is equally likely to have either
+/// sign. Counts the sign patterns whose sum is at least as extreme as the
+/// observed sum: two-sided (`|S| >= |S_obs|`), greater (`S >= S_obs`) and
+/// less (`S <= S_obs`). When `2**n <= n_resamples` every pattern is
+/// enumerated and the test is exact; otherwise `n_resamples` random
+/// patterns are drawn. Counts are integers, so the result does not depend on
+/// the thread count.
+///
+/// Returns (patterns, two_sided, greater, less, exact).
+#[pyfunction]
+fn sign_flip(
+    py: Python<'_>,
+    d: PyReadonlyArray1<'_, f64>,
+    n_resamples: u64,
+    seed: u64,
+) -> PyResult<(u64, u64, u64, u64, bool)> {
+    let d = d.as_slice()?;
+    if d.iter().any(|x| !x.is_finite()) {
+        return err("paired differences must be finite");
+    }
+    let n = d.len();
+    let obs: f64 = d.iter().sum();
+    // Patterns that tie the observed sum up to rounding count as "as extreme".
+    let tol = 1e-12 * d.iter().map(|x| x.abs()).sum::<f64>();
+    // Enumeration is O(n 2^n); beyond 2^30 patterns sampling is the only option.
+    let exact = n <= 30 && (1u64 << n) <= n_resamples;
+    let tally = move |s: f64| -> [u64; 3] {
+        [
+            (s.abs() >= obs.abs() - tol) as u64,
+            (s >= obs - tol) as u64,
+            (s <= obs + tol) as u64,
+        ]
+    };
+    let add = |a: [u64; 3], b: [u64; 3]| [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+    let counts = detached(py, || {
+        if exact {
+            (0..1usize << n)
+                .into_par_iter()
+                .with_min_len(1 << 10)
+                .map(|mask| {
+                    let s: f64 = d
+                        .iter()
+                        .enumerate()
+                        .map(|(i, &x)| if (mask >> i) & 1 == 1 { -x } else { x })
+                        .sum();
+                    tally(s)
+                })
+                .reduce(|| [0; 3], add)
+        } else {
+            (0..n_resamples as usize)
+                .into_par_iter()
+                .with_min_len(16)
+                .map(|r| {
+                    let mut rng = Rng::new(seed, r as u64);
+                    let (mut s, mut bits, mut left) = (0.0f64, 0u64, 0u32);
+                    for &x in d {
+                        if left == 0 {
+                            bits = rng.next_u64();
+                            left = 64;
+                        }
+                        s += if bits & 1 == 1 { -x } else { x };
+                        bits >>= 1;
+                        left -= 1;
+                    }
+                    tally(s)
+                })
+                .reduce(|| [0; 3], add)
+        }
+    });
+    let patterns = if exact { 1u64 << n } else { n_resamples };
+    Ok((patterns, counts[0], counts[1], counts[2], exact))
+}
+
 #[pymodule(gil_used = false)]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(score_table, m)?)?;
+    m.add_function(wrap_pyfunction!(merge_score_tables, m)?)?;
+    m.add_function(wrap_pyfunction!(sign_flip, m)?)?;
     m.add_function(wrap_pyfunction!(roc_auc_ap, m)?)?;
     m.add_function(wrap_pyfunction!(many_scores, m)?)?;
     m.add_function(wrap_pyfunction!(many_targets, m)?)?;
@@ -1229,6 +1576,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ranking, m)?)?;
     m.add_function(wrap_pyfunction!(bootstrap_group_means, m)?)?;
     m.add_function(wrap_pyfunction!(delong_components, m)?)?;
+    m.add_function(wrap_pyfunction!(hash_codes, m)?)?;
     m.add_function(wrap_pyfunction!(set_num_threads, m)?)?;
     m.add_function(wrap_pyfunction!(num_threads, m)?)?;
     Ok(())

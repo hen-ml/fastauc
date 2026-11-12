@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "pyfastauc"
-version = "0.1.0"
+version = "0.2.0"
 description = "Fast, multithreaded classification, calibration and ranking metrics (ROC-AUC, average precision, PR-AUC, GAUC, NDCG, MRR, MAP, KS, log loss, ECE), written in Rust"
 readme = "README.md"
 license = "MIT"
@@ -37,7 +37,7 @@ Changelog = "https://github.com/hen-ml/fastauc/blob/main/CHANGELOG.md"
 python-source = "python"
 module-name = "fastauc._core"
 features = ["pyo3/extension-module"]
-exclude = ["dist/**", "target/**", ".github/**"]
+exclude = ["dist/**", "target/**", ".github/**", "docs/**", "mkdocs.yml", "redirect/**", "conda-recipe/**"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
