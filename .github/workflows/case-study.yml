@@ -1,0 +1,59 @@
+# Runs benchmarks/case_study.py on Istella-S LETOR (Dato et al., ACM TOIS 2016).
+# The archive is downloaded from Istella's server and checked against the size
+# and SHA-256 that TensorFlow Datasets publishes
+# (tensorflow_datasets/ranking/istella/checksums.tsv).
+name: Case study
+
+on:
+  workflow_dispatch:
+    inputs:
+      rounds:
+        description: Boosting rounds
+        default: "500"
+  pull_request:
+    paths:
+      - benchmarks/case_study.py
+      - .github/workflows/case-study.yml
+
+permissions:
+  contents: read
+
+jobs:
+  istella-s:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: actions/cache@v4
+        id: data
+        with:
+          path: data/istella-s/sample
+          key: istella-s-letor-41b21116a3650cc0
+      - name: Download Istella-S LETOR and verify it
+        if: ${{ steps.data.outputs.cache-hit != 'true' }}
+        run: |
+          set -euo pipefail
+          curl -fL --retry 5 --retry-delay 15 -o istella-s-letor.tar.gz \
+            http://library.istella.it/dataset/istella-s-letor.tar.gz
+          test "$(stat -c %s istella-s-letor.tar.gz)" = 472129615
+          echo "41b21116a3650cc043dbe16f02ee39f4467f9405b37fdbcc9a6a05e230a38981  istella-s-letor.tar.gz" | sha256sum -c -
+          mkdir -p data/istella-s
+          tar -xzf istella-s-letor.tar.gz -C data/istella-s
+          rm istella-s-letor.tar.gz
+          ls -la data/istella-s/sample
+      - name: Build fastauc from this commit
+        run: |
+          pip install maturin
+          maturin build --release -o dist
+          pip install dist/*.whl "lightgbm>=4" scikit-learn
+      - name: Run the case study
+        run: |
+          python benchmarks/case_study.py --data data/istella-s/sample --name "Istella-S LETOR" \
+            --rounds "${{ inputs.rounds || '500' }}" --out case_study_istella_s.json
+      - uses: actions/upload-artifact@v6
+        with:
+          name: case-study-istella-s
+          path: case_study_istella_s.json

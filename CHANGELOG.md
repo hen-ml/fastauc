@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Docs: [case study](https://hen-ml.github.io/fastauc/case-study/) on Istella-S LETOR. LightGBM's own NDCG@10 after one round ranges from 0.465 to 0.694 with row order alone, and short-patience early stopping can keep the round-1 model. Script: `benchmarks/case_study.py`, charts: `benchmarks/plot_case_study.py`.
+
 ## 0.3.0
 
 - `fastauc.lightgbm` and `fastauc.xgboost`: one-line evaluation metrics, e.g. `feval=fastauc.lightgbm.ranking("ndcg@10", "mrr@10", "gauc")` or `custom_metric=fastauc.xgboost.binary("roc_auc", "log_loss")`, with exact ties and early-stopping directions; XGBoost's per-query weights are honoured.
