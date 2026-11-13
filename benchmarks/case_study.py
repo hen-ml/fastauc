@@ -1,6 +1,7 @@
 """Case study: do LightGBM's built-in ranking metrics depend on row order?
 
-Trains LambdaMART on MSLR-WEB10K (Fold1) and reports, per boosting round,
+Trains LambdaMART on a learning-to-rank benchmark (Istella-S LETOR in CI;
+MSLR-WEB10K or any SVMlight dataset with qid locally) and reports, per round,
 LightGBM's own validation NDCG@10 on three copies of the validation set that
 differ only in the order of rows within each query:
 
@@ -18,9 +19,10 @@ Queries with no relevant document are dropped from validation and test:
 LightGBM scores them 1.0 and fastauc leaves them out by default, so dropping
 them makes the two agree exactly when there are no ties.
 
-    python benchmarks/case_study_mslr.py --data /path/to/MSLR-WEB10K --out results.json
+    python benchmarks/case_study.py --data /path/to/istella-s/sample --name "Istella-S LETOR"
+    python benchmarks/case_study.py --data /path/to/MSLR-WEB10K/Fold1 --name "MSLR-WEB10K Fold1"
 
-``--data`` holds ``Fold1/{train,vali,test}.txt`` (SVMlight format with qid).
+``--data`` holds ``train.txt``, ``vali.txt`` and ``test.txt`` (SVMlight with qid).
 """
 from __future__ import annotations
 
@@ -49,6 +51,7 @@ K = 10
 
 def load(path: str, max_queries: int = 0):
     X, y, qid = load_svmlight_file(path, query_id=True, dtype=np.float32)
+    X = X.toarray()  # dense float32 is smaller than CSR for these (mostly dense) features
     starts = np.flatnonzero(np.r_[True, qid[1:] != qid[:-1]])
     if len(np.unique(qid)) != len(starts):
         raise ValueError(f"{path}: rows of a query are not contiguous")
@@ -148,21 +151,21 @@ def early_stop(curve: List[float], patience: int) -> int:
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--data", required=True, help="directory with Fold1/{train,vali,test}.txt")
+    ap.add_argument("--data", required=True, help="directory with train.txt, vali.txt, test.txt")
+    ap.add_argument("--name", default="dataset", help="dataset name for the report")
     ap.add_argument("--rounds", type=int, default=500)
     ap.add_argument("--learning-rate", type=float, default=0.05)
     ap.add_argument("--num-leaves", type=int, default=63)
     ap.add_argument("--patience", type=int, nargs="+", default=[10, 25, 50])
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--max-queries", type=int, default=0, help="limit queries per split (smoke tests)")
-    ap.add_argument("--out", default="case_study_mslr.json")
+    ap.add_argument("--out", default="case_study.json")
     args = ap.parse_args(argv)
 
     t0 = time.time()
-    fold = os.path.join(args.data, "Fold1")
-    Xtr, ytr, gtr = load(os.path.join(fold, "train.txt"), args.max_queries)
-    Xva, yva, gva = drop_unjudged(*load(os.path.join(fold, "vali.txt"), args.max_queries))
-    Xte, yte, gte = drop_unjudged(*load(os.path.join(fold, "test.txt"), args.max_queries))
+    Xtr, ytr, gtr = load(os.path.join(args.data, "train.txt"), args.max_queries)
+    Xva, yva, gva = drop_unjudged(*load(os.path.join(args.data, "vali.txt"), args.max_queries))
+    Xte, yte, gte = drop_unjudged(*load(os.path.join(args.data, "test.txt"), args.max_queries))
     t_load = time.time() - t0
     print(f"loaded in {t_load:.0f}s: train {len(gtr)} queries / {len(ytr)} docs, "
           f"valid {len(gva)} / {len(yva)}, test {len(gte)} / {len(yte)}", flush=True)
@@ -253,7 +256,7 @@ def main(argv=None):
               f"{res['queries_with_mixed_tie_in_top_k']:.1%}", flush=True)
 
     result = {
-        "dataset": "MSLR-WEB10K Fold1",
+        "dataset": args.name,
         "split_sizes": {"train": [len(gtr), len(ytr)], "valid": [len(gva), len(yva)],
                         "test": [len(gte), len(yte)]},
         "params": {**params, "rounds": args.rounds},
