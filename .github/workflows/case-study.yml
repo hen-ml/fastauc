@@ -1,0 +1,58 @@
+# Runs benchmarks/case_study_mslr.py on MSLR-WEB10K. The archive comes from
+# Microsoft's own link and is checked against the size and SHA-256 published
+# by TensorFlow Datasets (tensorflow_datasets/ranking/mslr_web/checksums.tsv).
+name: Case study (MSLR-WEB10K)
+
+on:
+  workflow_dispatch:
+    inputs:
+      rounds:
+        description: Boosting rounds
+        default: "500"
+  pull_request:
+    paths:
+      - benchmarks/case_study_mslr.py
+      - .github/workflows/case-study.yml
+
+permissions:
+  contents: read
+
+jobs:
+  mslr-web10k:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: actions/cache@v4
+        id: data
+        with:
+          path: data/MSLR-WEB10K/Fold1
+          key: mslr-web10k-fold1-2902142ea33f18c5
+      - name: Download MSLR-WEB10K and verify it
+        if: ${{ steps.data.outputs.cache-hit != 'true' }}
+        run: |
+          set -euo pipefail
+          url='https://api.onedrive.com/v1.0/shares/s!AtsMfWUz5l8nbOIoJ6Ks0bEMp78/root/content'
+          curl -fL --retry 5 --retry-delay 15 -o MSLR-WEB10K.zip "$url"
+          test "$(stat -c %s MSLR-WEB10K.zip)" = 1234144912
+          echo "2902142ea33f18c59414f654212de5063033b707d5c3939556124b1120d3a0ba  MSLR-WEB10K.zip" | sha256sum -c -
+          mkdir -p data/MSLR-WEB10K
+          unzip -q MSLR-WEB10K.zip 'Fold1/*' -d data/MSLR-WEB10K
+          rm MSLR-WEB10K.zip
+          ls -la data/MSLR-WEB10K/Fold1
+      - name: Build fastauc from this commit
+        run: |
+          pip install maturin
+          maturin build --release -o dist
+          pip install dist/*.whl "lightgbm>=4" scikit-learn
+      - name: Run the case study
+        run: |
+          python benchmarks/case_study_mslr.py --data data/MSLR-WEB10K \
+            --rounds "${{ inputs.rounds || '500' }}" --out case_study_mslr.json
+      - uses: actions/upload-artifact@v6
+        with:
+          name: case-study-mslr
+          path: case_study_mslr.json
