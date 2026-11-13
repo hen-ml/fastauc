@@ -355,6 +355,13 @@ every metric is unchanged under row permutation, including the adversarial
 With no ties these are the textbook definitions, and NDCG matches
 `sklearn.metrics.ndcg_score` (which also averages ties).
 
+On a public benchmark this is not a corner case. Training LambdaMART on
+Istella-S LETOR, LightGBM's own validation NDCG@10 after the first round is
+anywhere from 0.465 to 0.694 depending only on row order (fastauc: 0.569),
+and with the relevant rows first, early stopping with a patience of 10 keeps
+the round-1 model (test NDCG@10 0.564 instead of 0.762). Details and the
+script: [case study](https://hen-ml.github.io/fastauc/case-study/).
+
 The tie-aware forms of the IR measures go back to McSherry and Najork,
 [*Computing Information Retrieval Performance Measures Efficiently in the
 Presence of Tied Scores*](https://doi.org/10.1007/978-3-540-78646-7_38)

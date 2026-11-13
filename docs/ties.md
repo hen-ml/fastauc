@@ -62,6 +62,10 @@ including GAUC, bootstrap replicates and streaming.
   CLEF 2010, LNCS 6360, pp. 112 to 123.
   [doi:10.1007/978-3-642-15998-5_13](https://doi.org/10.1007/978-3-642-15998-5_13)
 
+For what this does to real training runs, see the
+[case study](case-study.md): on Istella-S LETOR, LightGBM's own NDCG@10
+after one round ranges from 0.465 to 0.694 depending on row order.
+
 ## How other libraries behave
 
 `python benchmarks/tie_leak.py` runs other libraries on 1,000 queries of 10

@@ -9,6 +9,7 @@ copyright: MIT License
 nav:
   - Overview: index.md
   - Exact tie handling: ties.md
+  - "Case study: LightGBM and row order": case-study.md
   - Binary and multiclass metrics: binary.md
   - Ranking metrics: ranking.md
   - scikit-learn drop-in: sklearn.md
